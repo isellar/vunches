@@ -82,6 +82,7 @@ ipcMain.handle('play-stream', (_e, url, channelName) => {
     '--hwdec=auto',
     '--force-window=immediate',
     '--ontop=no',
+    '--tls-verify=no',
   ]
 
   return new Promise((resolve) => {
@@ -123,12 +124,12 @@ ipcMain.handle('play-stream', (_e, url, channelName) => {
 ipcMain.handle('fetch-url', (_e, url) => {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith('https') ? require('https') : require('http')
-    const request = lib.get(url, { timeout: 30000 }, (res) => {
+    const request = lib.get(url, { timeout: 30000, rejectUnauthorized: false }, (res) => {
       // Follow redirects
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         ipcMain.emit('fetch-url', null, res.headers.location)
         const lib2 = res.headers.location.startsWith('https') ? require('https') : require('http')
-        lib2.get(res.headers.location, { timeout: 30000 }, (res2) => {
+        lib2.get(res.headers.location, { timeout: 30000, rejectUnauthorized: false }, (res2) => {
           const chunks = []
           res2.on('data', (c) => chunks.push(c))
           res2.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))

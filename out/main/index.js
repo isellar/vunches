@@ -124,11 +124,11 @@ ipcMain.handle("play-stream", (_e, url, channelName) => {
 ipcMain.handle("fetch-url", (_e, url) => {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? require("https") : require("http");
-    const request = lib.get(url, { timeout: 3e4 }, (res) => {
+    const request = lib.get(url, { timeout: 3e4, rejectUnauthorized: false }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         ipcMain.emit("fetch-url", null, res.headers.location);
         const lib2 = res.headers.location.startsWith("https") ? require("https") : require("http");
-        lib2.get(res.headers.location, { timeout: 3e4 }, (res2) => {
+        lib2.get(res.headers.location, { timeout: 3e4, rejectUnauthorized: false }, (res2) => {
           const chunks2 = [];
           res2.on("data", (c) => chunks2.push(c));
           res2.on("end", () => resolve(Buffer.concat(chunks2).toString("utf8")));
