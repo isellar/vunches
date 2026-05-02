@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from './store/useStore'
 import Sidebar from './components/Sidebar'
 import ChannelList from './components/ChannelList'
@@ -15,50 +15,63 @@ export default function App() {
     isLoading, loadError, setFavorites, setRecentlyWatched,
     selectedDevice, selectDevice, setAggressiveReconnect, setCastDevices,
     setCastStatus, setCastError,
-    setEpg, setEpgUrl, setEpgStatus, setEpgError, showGuide,
+    setEpg, setEpgUrl, setEpgStatus, setEpgError, showGuide, setShowGuide,
+    epgUrl, epgRefreshInterval,
+    activeSourceId, setActiveSourceId,
+    searchQuery, setSearchQuery,
+    activeChannel, toggleFavorite, favorites,
   } = useStore()
 
   const [initializing, setInitializing] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [loadProgress, setLoadProgress] = useState(null)
+  const epgRefreshTimer = useRef(null)
 
+  // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    window.electron.onPlaylistProgress((data) => setLoadProgress(data))
-    window.electron.onEpgProgress((data) => {
+    window.electron.onPlaylistProgress(data => setLoadProgress(data))
+    window.electron.onEpgProgress(data => {
       if (data.stage === 'done') setEpgStatus('ready')
       else if (data.stage !== 'cache') setEpgStatus('loading')
     })
 
     async function init() {
-      const [savedSources, savedFavorites, savedRecent, savedDevice, savedAggressive, savedEpgUrl] =
-        await Promise.all([
-          window.electron.store.get('sources'),
-          window.electron.store.get('favorites'),
-          window.electron.store.get('recentlyWatched'),
-          window.electron.store.get('selectedDevice'),
-          window.electron.store.get('aggressiveReconnect'),
-          window.electron.store.get('epgUrl'),
-        ])
+      const [savedSources, savedFavs, savedRecent, savedDevice, savedAggressive,
+             savedEpgUrl, savedActiveId, savedRefresh] = await Promise.all([
+        window.electron.store.get('sources'),
+        window.electron.store.get('favorites'),
+        window.electron.store.get('recentlyWatched'),
+        window.electron.store.get('selectedDevice'),
+        window.electron.store.get('aggressiveReconnect'),
+        window.electron.store.get('epgUrl'),
+        window.electron.store.get('activeSourceId'),
+        window.electron.store.get('epgRefreshInterval'),
+      ])
 
       setSources(savedSources || [])
-      setFavorites(savedFavorites || [])
+      setFavorites(savedFavs || [])
       setRecentlyWatched(savedRecent || [])
       if (savedDevice) selectDevice(savedDevice)
       if (savedAggressive != null) setAggressiveReconnect(savedAggressive)
       if (savedEpgUrl) setEpgUrl(savedEpgUrl)
+      if (savedRefresh) useStore.setState({ epgRefreshInterval: savedRefresh })
 
-      if (savedSources?.length > 0) await loadSource(savedSources[0])
+      // Load the active source
+      const allSources = savedSources || []
+      const activeId = savedActiveId || allSources[0]?.id || null
+      if (activeId) setActiveSourceId(activeId)
+
+      const source = allSources.find(s => s.id === activeId) || allSources[0]
+      if (source) await loadSource(source)
       if (savedEpgUrl) loadEpg(savedEpgUrl)
       setInitializing(false)
     }
     init()
 
-    // Cast discovery + events
-    window.electron.cast.startDiscovery().then(devices => {
-      if (devices?.length) setCastDevices(devices)
-    })
+    // Cast
+    window.electron.cast.startDiscovery().then(d => { if (d?.length) setCastDevices(d) })
     window.electron.cast.onDevicesUpdated(setCastDevices)
-    window.electron.cast.onMediaStatus((s) => {
+    window.electron.cast.onMediaStatus(s => {
       if (s.type === 'MEDIA_STATUS' && s.status?.[0]) {
         const ps = s.status[0].playerState
         if      (ps === 'PLAYING')                   setCastStatus('playing')
@@ -69,31 +82,84 @@ export default function App() {
     window.electron.cast.onDisconnected(() => setCastStatus('idle'))
     window.electron.cast.onReconnecting(() => setCastStatus('reconnecting'))
     window.electron.cast.onReconnected(()  => setCastStatus('playing'))
-    window.electron.cast.onError((e)       => { setCastStatus('error'); setCastError(e) })
+    window.electron.cast.onError(e => { setCastStatus('error'); setCastError(e) })
 
     return () => {
       window.electron.cast.offAll()
       window.electron.offPlaylistProgress()
       window.electron.offEpgProgress()
+      if (epgRefreshTimer.current) clearInterval(epgRefreshTimer.current)
     }
   }, [])
 
+  // ── EPG auto-refresh ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (epgRefreshTimer.current) clearInterval(epgRefreshTimer.current)
+    if (!epgUrl || !epgRefreshInterval) return
+    const ms = epgRefreshInterval * 60 * 60 * 1000
+    epgRefreshTimer.current = setInterval(() => loadEpg(epgUrl), ms)
+    return () => clearInterval(epgRefreshTimer.current)
+  }, [epgUrl, epgRefreshInterval])
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  useEffect(() => {
+    function onKey(e) {
+      const tag = e.target.tagName
+      const typing = tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable
+
+      // / — focus search (even when typing in other inputs if search not focused)
+      if (e.key === '/' && !typing) {
+        e.preventDefault()
+        document.querySelector('input[placeholder="Search channels..."]')?.focus()
+        return
+      }
+
+      if (typing) return
+
+      if (e.key === 'Escape') {
+        if (showGuide)       { setShowGuide(false); return }
+        if (searchQuery)     { setSearchQuery(''); return }
+        if (showSettings)    { setShowSettings(false); return }
+      }
+      if (e.key === 'g' || e.key === 'G') {
+        if (useStore.getState().epgStatus === 'ready') setShowGuide(!showGuide)
+      }
+      if (e.key === 'f' || e.key === 'F') {
+        const ch = useStore.getState().activeChannel
+        if (ch) toggleFavorite(ch.url)
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        const s = useStore.getState().sources.find(s => s.id === useStore.getState().activeSourceId)
+          || useStore.getState().sources[0]
+        if (s) loadSource(s)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showGuide, searchQuery, showSettings])
+
+  // ── Load source ───────────────────────────────────────────────────────────
   async function loadSource(source) {
     setLoading(true)
     setLoadError(null)
     setLoadProgress(null)
     try {
-      const result = await window.electron.loadPlaylist(source.url)
-      // Handle both old (array) and new ({ channels, tvgUrl }) shapes
-      const channels = Array.isArray(result) ? result : result.channels
-      const tvgUrlFromM3u = Array.isArray(result) ? null : result.tvgUrl
+      let channels, tvgUrlFromM3u = null
+
+      if (source.type === 'xtream') {
+        channels = await loadXtreamSource(source)
+      } else {
+        const result = await window.electron.loadPlaylist(source.url)
+        channels = Array.isArray(result) ? result : result.channels
+        tvgUrlFromM3u = Array.isArray(result) ? null : result.tvgUrl
+      }
+
       setChannels(channels)
 
-      // Auto-load EPG if we don't already have one configured
-      const currentEpgUrl = useStore.getState().epgUrl
-      if (!currentEpgUrl) {
-        autoLoadEpg(source.url, tvgUrlFromM3u)
-      }
+      // Auto-detect EPG if none set
+      const currentEpg = useStore.getState().epgUrl
+      if (!currentEpg) autoLoadEpg(source, tvgUrlFromM3u)
+
     } catch (err) {
       setLoadError(err.message || 'Failed to load playlist')
     } finally {
@@ -102,19 +168,37 @@ export default function App() {
     }
   }
 
-  async function autoLoadEpg(m3uUrl, tvgUrlFromHeader) {
-    // 1. Use tvg-url from M3U header if present
-    // 2. Otherwise probe common URL patterns
-    let epgUrl = tvgUrlFromHeader
-    if (!epgUrl) {
-      epgUrl = await window.electron.detectEpgUrl(m3uUrl)
-    }
-    if (!epgUrl) return
+  async function loadXtreamSource(source) {
+    // Fetch live categories + streams and map to channel format
+    const [cats, streams] = await Promise.all([
+      window.electron.xtreamFetch({ host: source.host, username: source.username, password: source.password, action: 'get_live_categories' }),
+      window.electron.xtreamFetch({ host: source.host, username: source.username, password: source.password, action: 'get_live_streams' }),
+    ])
 
-    // Save and load it
-    setEpgUrl(epgUrl)
-    await window.electron.store.set('epgUrl', epgUrl)
-    loadEpg(epgUrl)
+    const catMap = {}
+    if (Array.isArray(cats)) cats.forEach(c => { catMap[c.category_id] = c.category_name })
+
+    return (Array.isArray(streams) ? streams : []).map(s => ({
+      id: `xtream-${s.stream_id}`,
+      name: s.name || 'Unknown',
+      url: `${source.host.replace(/\/$/, '')}/live/${source.username}/${source.password}/${s.stream_id}.ts`,
+      tvgId: s.epg_channel_id || String(s.stream_id),
+      tvgLogo: s.stream_icon || '',
+      group: { title: catMap[s.category_id] || 'Uncategorized' },
+    }))
+  }
+
+  async function autoLoadEpg(source, tvgUrlFromHeader) {
+    let url = tvgUrlFromHeader
+    if (!url && source.type === 'm3u') url = await window.electron.detectEpgUrl(source.url)
+    if (!url && source.type === 'xtream') {
+      // Xtream EPG endpoint
+      url = `${source.host.replace(/\/$/, '')}/xmltv.php?username=${source.username}&password=${source.password}`
+    }
+    if (!url) return
+    setEpgUrl(url)
+    await window.electron.store.set('epgUrl', url)
+    loadEpg(url)
   }
 
   async function loadEpg(url) {
@@ -131,12 +215,17 @@ export default function App() {
   }
 
   async function handleAddSource(source) {
-    const updated = [source]
+    const updated = [...sources, source]
     setSources(updated)
+    setActiveSourceId(source.id)
     await window.electron.store.set('sources', updated)
+    await window.electron.store.set('activeSourceId', source.id)
     await loadSource(source)
   }
 
+  const activeSource = sources.find(s => s.id === activeSourceId) || sources[0]
+
+  // ── Render ────────────────────────────────────────────────────────────────
   if (initializing) {
     return (
       <div className="flex items-center justify-center h-screen bg-[#0f0f0f]">
@@ -150,28 +239,26 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[#0f0f0f] text-gray-100 select-none">
       <Titlebar
-        onReload={() => loadSource(sources[0])}
+        onReload={() => activeSource && loadSource(activeSource)}
         onOpenSettings={() => setShowSettings(true)}
       />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <main className="flex-1 flex flex-col overflow-hidden relative">
-          {isLoading && (
-            <LoadingScreen progress={loadProgress} />
-          )}
+          {isLoading && <LoadingScreen progress={loadProgress} />}
           {loadError && !isLoading && (
             <div className="flex items-center justify-center flex-1">
               <div className="text-center">
                 <p className="text-red-400 mb-2 font-medium">Failed to load playlist</p>
-                <p className="text-gray-500 text-sm">{loadError}</p>
-                <div className="flex gap-3 justify-center mt-4">
-                  <button onClick={() => loadSource(sources[0])}
+                <p className="text-gray-500 text-sm mb-4">{loadError}</p>
+                <div className="flex gap-3 justify-center">
+                  <button onClick={() => activeSource && loadSource(activeSource)}
                     className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm transition-colors">
                     Retry
                   </button>
                   <button onClick={() => setShowSettings(true)}
                     className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded text-sm transition-colors">
-                    Change playlist
+                    Settings
                   </button>
                 </div>
               </div>
@@ -184,7 +271,13 @@ export default function App() {
 
       <CastBar />
 
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <Settings
+          onClose={() => setShowSettings(false)}
+          onLoadSource={(source) => loadSource(source)}
+          onLoadEpg={(url) => loadEpg(url)}
+        />
+      )}
     </div>
   )
 }

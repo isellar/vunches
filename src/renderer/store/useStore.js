@@ -2,7 +2,8 @@ import { create } from 'zustand'
 
 export const useStore = create((set, get) => ({
   // --- Playlist ---
-  sources: [],
+  sources: [],      // [{ id, name, url, type: 'm3u'|'xtream', host?, username?, password? }]
+  activeSourceId: null,
   channels: [],
   isLoading: false,
   loadError: null,
@@ -17,19 +18,20 @@ export const useStore = create((set, get) => ({
   recentlyWatched: [],
 
   // --- EPG ---
-  epg: {},              // { [tvgId]: [ { title, desc, start, stop } ] }
+  epg: {},
   epgUrl: '',
   epgStatus: 'idle',   // idle | loading | ready | error
   epgError: null,
   showGuide: false,
+  epgRefreshInterval: 6, // hours
 
-  setEpg: (epg) => set({ epg }),
-  setEpgUrl: (epgUrl) => set({ epgUrl }),
-  setEpgStatus: (epgStatus) => set({ epgStatus }),
-  setEpgError: (epgError) => set({ epgError }),
-  setShowGuide: (showGuide) => set({ showGuide }),
+  setEpg:                (epg)    => set({ epg }),
+  setEpgUrl:             (epgUrl) => set({ epgUrl }),
+  setEpgStatus:          (s)      => set({ epgStatus: s }),
+  setEpgError:           (e)      => set({ epgError: e }),
+  setShowGuide:          (v)      => set({ showGuide: v }),
+  setEpgRefreshInterval: (v)      => { set({ epgRefreshInterval: v }); window.electron?.store.set('epgRefreshInterval', v) },
 
-  // Get now/next for a channel by its tvg-id
   getNowNext: (tvgId) => {
     if (!tvgId) return { now: null, next: null }
     const { epg } = get()
@@ -43,18 +45,20 @@ export const useStore = create((set, get) => ({
 
   // --- Cast ---
   castDevices: [],
-  selectedDevice: null,       // { name, host, port } — persisted
-  castStatus: 'idle',         // idle | connecting | playing | paused | reconnecting | error
+  selectedDevice: null,
+  castStatus: 'idle',
   castError: null,
-  aggressiveReconnect: false, // persisted
+  aggressiveReconnect: false,
 
   // --- Actions: playlist ---
-  setSources: (sources) => set({ sources }),
-  setChannels: (channels) => set({ channels }),
-  setLoading: (isLoading) => set({ isLoading }),
-  setLoadError: (loadError) => set({ loadError }),
-  setSelectedCategory: (selectedCategory) => set({ selectedCategory }),
-  setSearchQuery: (searchQuery) => set({ searchQuery }),
+  setSources:      (sources)      => set({ sources }),
+  setActiveSourceId: (id)         => set({ activeSourceId: id }),
+  setChannels:     (channels)     => set({ channels }),
+  setLoading:      (isLoading)    => set({ isLoading }),
+  setLoadError:    (loadError)    => set({ loadError }),
+  setSelectedCategory: (c)        => set({ selectedCategory: c }),
+  setSearchQuery:  (searchQuery)  => set({ searchQuery }),
+
   setActiveChannel: (channel) => {
     const { recentlyWatched } = get()
     if (!channel) return set({ activeChannel: null })
@@ -63,6 +67,7 @@ export const useStore = create((set, get) => ({
     set({ activeChannel: channel, recentlyWatched: updated })
     window.electron?.store.set('recentlyWatched', updated)
   },
+
   toggleFavorite: (channelUrl) => {
     const { favorites } = get()
     const updated = favorites.includes(channelUrl)
@@ -71,13 +76,14 @@ export const useStore = create((set, get) => ({
     set({ favorites: updated })
     window.electron?.store.set('favorites', updated)
   },
-  setFavorites: (favorites) => set({ favorites }),
-  setRecentlyWatched: (recentlyWatched) => set({ recentlyWatched }),
+
+  setFavorites:        (favorites)       => set({ favorites }),
+  setRecentlyWatched:  (recentlyWatched) => set({ recentlyWatched }),
 
   // --- Actions: cast ---
-  setCastDevices: (castDevices) => set({ castDevices }),
-  setCastStatus:  (castStatus)  => set({ castStatus }),
-  setCastError:   (castError)   => set({ castError }),
+  setCastDevices:  (castDevices) => set({ castDevices }),
+  setCastStatus:   (castStatus)  => set({ castStatus }),
+  setCastError:    (castError)   => set({ castError }),
   selectDevice: (device) => {
     set({ selectedDevice: device, castStatus: 'idle', castError: null })
     window.electron?.store.set('selectedDevice', device)
@@ -94,6 +100,7 @@ export const useStore = create((set, get) => ({
     channels.forEach(ch => { if (ch.group?.title) cats.add(ch.group.title) })
     return ['All', 'Favorites', 'Recent', ...Array.from(cats).sort()]
   },
+
   getFilteredChannels: () => {
     const { channels, selectedCategory, searchQuery, favorites, recentlyWatched } = get()
     let list = channels

@@ -6,15 +6,23 @@ contextBridge.exposeInMainWorld("electron", {
     set: (key, value) => ipcRenderer.invoke("store-set", key, value),
     delete: (key) => ipcRenderer.invoke("store-delete", key)
   },
-  playStream: (url, channelName) => ipcRenderer.invoke("play-stream", url, channelName),
+  playStream: (url, name) => ipcRenderer.invoke("play-stream", url, name),
   fetchUrl: (url) => ipcRenderer.invoke("fetch-url", url),
   loadPlaylist: (url) => ipcRenderer.invoke("load-playlist", url),
-  onPlaylistProgress: (cb) => ipcRenderer.on("playlist-progress", (_e, data) => cb(data)),
-  offPlaylistProgress: () => ipcRenderer.removeAllListeners("playlist-progress"),
+  detectEpgUrl: (url) => ipcRenderer.invoke("detect-epg-url", url),
   loadEpg: (url) => ipcRenderer.invoke("load-epg", url),
-  detectEpgUrl: (m3uUrl) => ipcRenderer.invoke("detect-epg-url", m3uUrl),
-  onEpgProgress: (cb) => ipcRenderer.on("epg-progress", (_e, data) => cb(data)),
+  // Xtream Codes
+  xtreamFetch: (opts) => ipcRenderer.invoke("xtream-fetch", opts),
+  xtreamGetStreamUrl: (opts) => ipcRenderer.invoke("xtream-get-stream-url", opts),
+  // Import / Export
+  exportData: () => ipcRenderer.invoke("export-data"),
+  importData: () => ipcRenderer.invoke("import-data"),
+  // Progress events
+  onPlaylistProgress: (cb) => ipcRenderer.on("playlist-progress", (_e, d) => cb(d)),
+  offPlaylistProgress: () => ipcRenderer.removeAllListeners("playlist-progress"),
+  onEpgProgress: (cb) => ipcRenderer.on("epg-progress", (_e, d) => cb(d)),
   offEpgProgress: () => ipcRenderer.removeAllListeners("epg-progress"),
+  // Chromecast
   cast: {
     startDiscovery: () => ipcRenderer.invoke("cast-start-discovery"),
     stopDiscovery: () => ipcRenderer.invoke("cast-stop-discovery"),

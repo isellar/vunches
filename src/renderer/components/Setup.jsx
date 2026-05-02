@@ -21,7 +21,7 @@ export default function Setup({ onAdd }) {
         id: Date.now().toString(),
         name: name.trim() || 'My Playlist',
         url: trimmed,
-        type: 'url',
+        type: 'm3u',
       })
     } catch (err) {
       setError('Could not load that URL. Check the address and try again.')

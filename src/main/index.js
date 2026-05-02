@@ -388,6 +388,91 @@ ipcMain.handle('store-get',    async (_e, k)   => { const s = await getStore(); 
 ipcMain.handle('store-set',    async (_e, k, v) => { const s = await getStore(); s.set(k, v) })
 ipcMain.handle('store-delete', async (_e, k)   => { const s = await getStore(); s.delete(k) })
 
+// ─── IPC: Xtream Codes ────────────────────────────────────────────────────────
+
+ipcMain.handle('xtream-fetch', async (_e, { host, username, password, action }) => {
+  const baseUrl = host.replace(/\/$/, '')
+  const url = `${baseUrl}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&action=${action}`
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https') ? require('https') : require('http')
+    const req = lib.get(url, { timeout: 30000, rejectUnauthorized: false }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`HTTP ${res.statusCode}`))
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) }
+        catch { reject(new Error('Invalid JSON response from server')) }
+      })
+      res.on('error', reject)
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')) })
+  })
+})
+
+ipcMain.handle('xtream-get-stream-url', (_e, { host, username, password, streamId, streamType }) => {
+  const base = host.replace(/\/$/, '')
+  // streamType: 'live' | 'movie' | 'series'
+  const ext = streamType === 'live' ? 'ts' : 'mp4'
+  return `${base}/${streamType}/${username}/${password}/${streamId}.${ext}`
+})
+
+// ─── IPC: Export / Import ─────────────────────────────────────────────────────
+
+ipcMain.handle('export-data', async (event) => {
+  const { dialog } = require('electron')
+  const fs = require('fs')
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const s = await getStore()
+
+  const data = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    sources: s.get('sources') || [],
+    favorites: s.get('favorites') || [],
+    epgUrl: s.get('epgUrl') || '',
+    selectedDevice: s.get('selectedDevice') || null,
+    aggressiveReconnect: s.get('aggressiveReconnect') || false,
+  }
+
+  const { filePath, canceled } = await dialog.showSaveDialog(win, {
+    title: 'Export Vunches Settings',
+    defaultPath: `vunches-backup-${new Date().toISOString().slice(0,10)}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (canceled || !filePath) return { ok: false }
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2))
+  return { ok: true, filePath }
+})
+
+ipcMain.handle('import-data', async (event) => {
+  const { dialog } = require('electron')
+  const fs = require('fs')
+  const win = BrowserWindow.fromWebContents(event.sender)
+
+  const { filePaths, canceled } = await dialog.showOpenDialog(win, {
+    title: 'Import Vunches Settings',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  })
+  if (canceled || !filePaths.length) return { ok: false }
+
+  try {
+    const raw = fs.readFileSync(filePaths[0], 'utf8')
+    const data = JSON.parse(raw)
+    if (!data.version) throw new Error('Invalid backup file')
+    const s = await getStore()
+    if (data.sources?.length)   s.set('sources', data.sources)
+    if (data.favorites?.length) s.set('favorites', data.favorites)
+    if (data.epgUrl)            s.set('epgUrl', data.epgUrl)
+    if (data.selectedDevice)    s.set('selectedDevice', data.selectedDevice)
+    if (data.aggressiveReconnect != null) s.set('aggressiveReconnect', data.aggressiveReconnect)
+    return { ok: true, data }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 // ─── IPC: MPV ─────────────────────────────────────────────────────────────────
 
 ipcMain.handle('play-stream', (_e, url, channelName) => {
