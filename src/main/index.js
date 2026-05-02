@@ -1,21 +1,14 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 const { join } = require('path')
 const { spawn } = require('child_process')
 
-let Store
-async function getStore() {
-  if (!Store) {
-    const mod = await import('electron-store')
-    Store = mod.default
-  }
-  return Store
-}
-
 let store
 
-async function getStoreInstance() {
-  const S = await getStore()
-  if (!store) store = new S()
+async function getStore() {
+  if (!store) {
+    const { default: Store } = await import('electron-store')
+    store = new Store()
+  }
   return store
 }
 
@@ -33,44 +26,46 @@ function createWindow() {
       height: 40,
     },
     webPreferences: {
-      preload: join(__dirname, 'preload.js'),
+      preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: false,
     },
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL)
+  // electron-vite sets ELECTRON_RENDERER_URL in dev mode
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
     win.webContents.openDevTools({ mode: 'detach' })
   } else {
-    win.loadFile(join(__dirname, '../dist/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
 
 app.whenReady().then(async () => {
-  await getStoreInstance()
+  await getStore()
   createWindow()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
 })
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
-})
-
 // --- IPC: persistent store ---
 ipcMain.handle('store-get', async (_e, key) => {
-  const s = await getStoreInstance()
+  const s = await getStore()
   return s.get(key)
 })
 ipcMain.handle('store-set', async (_e, key, value) => {
-  const s = await getStoreInstance()
+  const s = await getStore()
   s.set(key, value)
 })
 ipcMain.handle('store-delete', async (_e, key) => {
-  const s = await getStoreInstance()
+  const s = await getStore()
   s.delete(key)
 })
 
@@ -78,6 +73,7 @@ ipcMain.handle('store-delete', async (_e, key) => {
 ipcMain.handle('play-stream', (_e, url, channelName) => {
   const mpvPaths = [
     'mpv',
+    'C:\\Program Files\\MPV Player\\mpv.exe',
     'C:\\Program Files\\mpv\\mpv.exe',
     'C:\\Program Files (x86)\\mpv\\mpv.exe',
     join(app.getPath('userData'), 'mpv', 'mpv.exe'),
@@ -106,10 +102,6 @@ ipcMain.handle('play-stream', (_e, url, channelName) => {
     } catch {
       continue
     }
-  }
-
-  if (!launched) {
-    shell.openExternal(url)
   }
 
   return { launched }
