@@ -20,10 +20,6 @@ export default function Settings({ onClose }) {
     setSuccess(false)
 
     try {
-      // Validate by fetching
-      const text = await window.electron?.fetchUrl(trimmedUrl)
-      if (!text) throw new Error('Empty response')
-
       const newSource = {
         id: current?.id || Date.now().toString(),
         name: name.trim() || 'My Playlist',
@@ -35,13 +31,11 @@ export default function Settings({ onClose }) {
       setSources(updated)
       await window.electron?.store.set('sources', updated)
 
-      // Parse and load new channels
-      const { parseM3u } = await import('../lib/parseM3u.js')
       setLoading(true)
       setLoadError(null)
       try {
-        const parsed = parseM3u(text)
-        setChannels(parsed)
+        const channels = await window.electron.loadPlaylist(trimmedUrl)
+        setChannels(channels)
         setSuccess(true)
         setTimeout(onClose, 800)
       } finally {

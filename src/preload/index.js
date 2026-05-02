@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('electron', {
   },
   playStream: (url, channelName) => ipcRenderer.invoke('play-stream', url, channelName),
   fetchUrl: (url) => ipcRenderer.invoke('fetch-url', url),
+  loadPlaylist: (url) => ipcRenderer.invoke('load-playlist', url),
+  onPlaylistProgress: (cb) => ipcRenderer.on('playlist-progress', (_e, data) => cb(data)),
+  offPlaylistProgress: () => ipcRenderer.removeAllListeners('playlist-progress'),
 
   cast: {
     startDiscovery:  ()       => ipcRenderer.invoke('cast-start-discovery'),

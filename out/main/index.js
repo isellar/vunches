@@ -468,3 +468,150 @@ ipcMain.handle("fetch-url", (_e, url) => {
     doReq(url, lib);
   });
 });
+function parseM3uIncremental(text) {
+  const channels = [];
+  const lines = text.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    if (!line.startsWith("#EXTINF")) {
+      i++;
+      continue;
+    }
+    const tvgId = line.match(/tvg-id="([^"]*)"/)?.[1] || "";
+    const tvgName = line.match(/tvg-name="([^"]*)"/)?.[1] || "";
+    const tvgLogo = line.match(/tvg-logo="([^"]*)"/)?.[1] || "";
+    const groupTitle = line.match(/group-title="([^"]*)"/)?.[1] || "";
+    const commaIdx = line.lastIndexOf(",");
+    const name = commaIdx >= 0 ? line.slice(commaIdx + 1).trim() : tvgName || "Unknown";
+    let url = "";
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trim();
+      if (next && !next.startsWith("#")) {
+        url = next;
+        i = j;
+        break;
+      }
+    }
+    if (url) {
+      channels.push({
+        id: `${tvgId || name}-${url}`,
+        name: name || tvgName || "Unknown Channel",
+        url,
+        tvgId,
+        tvgLogo,
+        group: { title: groupTitle }
+      });
+    }
+    i++;
+  }
+  return channels;
+}
+ipcMain.handle("load-playlist", (event, url) => {
+  const path = require("path");
+  const fs = require("fs");
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const cacheDir = app.getPath("userData");
+  const cacheFile = path.join(cacheDir, "playlist-cache.json");
+  const metaFile = path.join(cacheDir, "playlist-meta.json");
+  const sendProgress = (data) => {
+    try {
+      win?.webContents.send("playlist-progress", data);
+    } catch {
+    }
+  };
+  return new Promise((resolve, reject) => {
+    let cachedMeta = null;
+    try {
+      cachedMeta = JSON.parse(fs.readFileSync(metaFile, "utf8"));
+    } catch {
+    }
+    const lib = url.startsWith("https") ? require("https") : require("http");
+    const doReq = (reqUrl, reqLib) => {
+      const reqOpts = {
+        timeout: 6e4,
+        rejectUnauthorized: false,
+        headers: cachedMeta?.etag ? { "If-None-Match": cachedMeta.etag } : {}
+      };
+      const req = reqLib.get(reqUrl, reqOpts, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const loc = res.headers.location;
+          return doReq(loc, loc.startsWith("https") ? require("https") : require("http"));
+        }
+        if (res.statusCode === 304 && cachedMeta) {
+          sendProgress({ stage: "cache", message: "Using cached playlist" });
+          try {
+            const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+            sendProgress({ stage: "done", channels: cached.length });
+            return resolve(cached);
+          } catch {
+          }
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        }
+        const totalBytes = parseInt(res.headers["content-length"] || "0", 10);
+        const etag = res.headers["etag"] || null;
+        let receivedBytes = 0;
+        let buffer = "";
+        let channelCount = 0;
+        const chunks = [];
+        sendProgress({ stage: "downloading", receivedBytes: 0, totalBytes, channelCount: 0 });
+        res.on("data", (chunk) => {
+          chunks.push(chunk);
+          receivedBytes += chunk.length;
+          buffer += chunk.toString("utf8");
+          const matches = buffer.match(/#EXTINF/g);
+          const newCount = matches ? matches.length : 0;
+          if (newCount !== channelCount) {
+            channelCount = newCount;
+            sendProgress({ stage: "downloading", receivedBytes, totalBytes, channelCount });
+          }
+          if (buffer.length > 1e5) buffer = buffer.slice(-2e3);
+        });
+        res.on("end", () => {
+          sendProgress({ stage: "parsing", receivedBytes, totalBytes, channelCount });
+          const fullText = Buffer.concat(chunks).toString("utf8");
+          setImmediate(() => {
+            try {
+              const channels = parseM3uIncremental(fullText);
+              sendProgress({ stage: "done", channelCount: channels.length });
+              try {
+                fs.writeFileSync(cacheFile, JSON.stringify(channels));
+                fs.writeFileSync(metaFile, JSON.stringify({ etag, url, cachedAt: Date.now() }));
+              } catch {
+              }
+              resolve(channels);
+            } catch (e) {
+              reject(e);
+            }
+          });
+        });
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("Request timed out"));
+      });
+    };
+    if (cachedMeta?.url === url) {
+      try {
+        const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+        if (cached?.length > 0) {
+          sendProgress({ stage: "cache", message: `Loaded ${cached.length.toLocaleString()} channels from cache`, channelCount: cached.length });
+          resolve(cached);
+          setTimeout(() => {
+            try {
+              doReq(url, lib);
+            } catch {
+            }
+          }, 1e3);
+          return;
+        }
+      } catch {
+      }
+    }
+    doReq(url, lib);
+  });
+});
