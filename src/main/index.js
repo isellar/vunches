@@ -408,6 +408,81 @@ ipcMain.handle('play-stream', (_e, url, channelName) => {
   })
 })
 
+// ─── EPG URL Auto-detection ───────────────────────────────────────────────────
+
+function detectEpgUrl(m3uUrl, m3uText) {
+  // 1. Parse x-tvg-url from the M3U header line
+  // e.g. #EXTM3U x-tvg-url="http://provider.com/epg.xml"
+  if (m3uText) {
+    const headerLine = m3uText.slice(0, 1000) // only check top of file
+    const tvgUrl = headerLine.match(/x-tvg-url="([^"]+)"/i)?.[1]
+      || headerLine.match(/url-tvg="([^"]+)"/i)?.[1]
+    if (tvgUrl) return tvgUrl
+  }
+
+  // 2. Xtream Codes pattern: get.php?username=X&password=Y -> xmltv.php?username=X&password=Y
+  if (m3uUrl.includes('get.php')) {
+    return m3uUrl.replace('get.php', 'xmltv.php').replace(/&type=[^&]*/,'').replace(/&output=[^&]*/,'')
+  }
+
+  // 3. Common suffix patterns
+  const base = m3uUrl.replace(/\?.*$/, '').replace(/\/(playlist|get|channels)\.m3u.*$/i, '')
+  const candidates = [
+    m3uUrl.replace(/\.m3u.*$/, '.xml'),
+    m3uUrl.replace(/\.m3u.*$/, '.xml.gz'),
+    base + '/epg.xml',
+    base + '/epg.xml.gz',
+    base + '/xmltv.php',
+  ]
+  return candidates[0] // return best guess; we'll probe them
+}
+
+ipcMain.handle('detect-epg-url', async (_e, m3uUrl) => {
+  // Quick HEAD probe to check if a URL returns valid XML/gzip
+  const probe = (url) => new Promise((resolve) => {
+    try {
+      const lib = url.startsWith('https') ? require('https') : require('http')
+      const req = lib.request(url, { method: 'HEAD', timeout: 5000, rejectUnauthorized: false }, (res) => {
+        const ct = res.headers['content-type'] || ''
+        const ok = res.statusCode >= 200 && res.statusCode < 300
+          && (ct.includes('xml') || ct.includes('gzip') || ct.includes('octet') || url.endsWith('.gz'))
+        resolve(ok ? url : null)
+      })
+      req.on('error', () => resolve(null))
+      req.on('timeout', () => { req.destroy(); resolve(null) })
+      req.end()
+    } catch { resolve(null) }
+  })
+
+  // Build candidates in priority order
+  const candidates = []
+
+  // Xtream Codes
+  if (m3uUrl.includes('get.php')) {
+    const xmltvUrl = m3uUrl
+      .replace('get.php', 'xmltv.php')
+      .replace(/&type=[^&]*/g, '')
+      .replace(/&output=[^&]*/g, '')
+    candidates.push(xmltvUrl)
+  }
+
+  // Suffix-based guesses
+  const bare = m3uUrl.replace(/\?.*$/, '')
+  const base = bare.replace(/\/(get|playlist|channels|live|index)\.m3u[^/]*/i, '')
+  candidates.push(
+    bare.replace(/\.m3u[^?]*$/i, '.xml'),
+    bare.replace(/\.m3u[^?]*$/i, '.xml.gz'),
+    base + '/epg.xml.gz',
+    base + '/epg.xml',
+    base + '/xmltv.php',
+  )
+
+  // Probe all candidates in parallel
+  const results = await Promise.all(candidates.map(probe))
+  const found = results.find(r => r !== null) || null
+  return found
+})
+
 // ─── IPC: Fetch URL (raw, used by settings validation) ───────────────────────
 
 ipcMain.handle('fetch-url', (_e, url) => {
@@ -506,8 +581,8 @@ ipcMain.handle('load-playlist', (event, url) => {
           sendProgress({ stage: 'cache', message: 'Using cached playlist' })
           try {
             const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'))
-            sendProgress({ stage: 'done', channels: cached.length })
-            return resolve(cached)
+            sendProgress({ stage: 'done', channelCount: cached.length, tvgUrl: cachedMeta.tvgUrl || null })
+            return resolve({ channels: cached, tvgUrl: cachedMeta.tvgUrl || null })
           } catch {}
         }
 
@@ -545,19 +620,25 @@ ipcMain.handle('load-playlist', (event, url) => {
           sendProgress({ stage: 'parsing', receivedBytes, totalBytes, channelCount })
           const fullText = Buffer.concat(chunks).toString('utf8')
 
+          // Extract x-tvg-url from M3U header
+          const headerSnip = fullText.slice(0, 2000)
+          const tvgUrl = headerSnip.match(/x-tvg-url="([^"]+)"/i)?.[1]
+            || headerSnip.match(/url-tvg="([^"]+)"/i)?.[1]
+            || null
+
           // Parse in next tick so progress event renders first
           setImmediate(() => {
             try {
               const channels = parseM3uIncremental(fullText)
-              sendProgress({ stage: 'done', channelCount: channels.length })
+              sendProgress({ stage: 'done', channelCount: channels.length, tvgUrl })
 
               // Write cache
               try {
                 fs.writeFileSync(cacheFile, JSON.stringify(channels))
-                fs.writeFileSync(metaFile, JSON.stringify({ etag, url, cachedAt: Date.now() }))
+                fs.writeFileSync(metaFile, JSON.stringify({ etag, url, cachedAt: Date.now(), tvgUrl }))
               } catch {}
 
-              resolve(channels)
+              resolve({ channels, tvgUrl })
             } catch (e) {
               reject(e)
             }
@@ -576,10 +657,8 @@ ipcMain.handle('load-playlist', (event, url) => {
       try {
         const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'))
         if (cached?.length > 0) {
-          sendProgress({ stage: 'cache', message: `Loaded ${cached.length.toLocaleString()} channels from cache`, channelCount: cached.length })
-          // Resolve with cache immediately, then re-fetch in background to update
-          resolve(cached)
-          // Silently refresh in background
+          sendProgress({ stage: 'cache', message: `Loaded ${cached.length.toLocaleString()} channels from cache`, channelCount: cached.length, tvgUrl: cachedMeta.tvgUrl || null })
+          resolve({ channels: cached, tvgUrl: cachedMeta.tvgUrl || null })
           setTimeout(() => {
             try { doReq(url, lib) } catch {}
           }, 1000)

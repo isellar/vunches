@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useStore } from '../store/useStore'
 
 export default function Settings({ onClose }) {
@@ -13,6 +13,11 @@ export default function Settings({ onClose }) {
   const [success, setSuccess] = useState(false)
 
   const [epgInput, setEpgInput] = useState(epgUrl || '')
+
+  // Sync if epgUrl was auto-detected after settings was already open
+  useEffect(() => {
+    if (epgUrl && !epgInput) setEpgInput(epgUrl)
+  }, [epgUrl])
   const [epgLoading, setEpgLoading] = useState(false)
   const [epgError, setEpgErr] = useState('')
   const [epgSuccess, setEpgSuccess] = useState(false)
@@ -171,6 +176,9 @@ export default function Settings({ onClose }) {
             </h3>
             <p className="text-xs text-gray-600 mb-3">
               XMLTV URL from your provider — enables now/next info and the TV guide view.
+              {epgUrl && epgUrl === epgInput && (
+                <span className="ml-1.5 text-purple-400">Auto-detected from playlist.</span>
+              )}
             </p>
             <form onSubmit={handleSaveEpg} className="space-y-3">
               <div>

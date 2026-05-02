@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electron', {
   onPlaylistProgress: (cb) => ipcRenderer.on('playlist-progress', (_e, data) => cb(data)),
   offPlaylistProgress: () => ipcRenderer.removeAllListeners('playlist-progress'),
   loadEpg: (url) => ipcRenderer.invoke('load-epg', url),
+  detectEpgUrl: (m3uUrl) => ipcRenderer.invoke('detect-epg-url', m3uUrl),
   onEpgProgress: (cb) => ipcRenderer.on('epg-progress', (_e, data) => cb(data)),
   offEpgProgress: () => ipcRenderer.removeAllListeners('epg-progress'),
 

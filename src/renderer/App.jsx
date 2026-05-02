@@ -83,14 +83,38 @@ export default function App() {
     setLoadError(null)
     setLoadProgress(null)
     try {
-      const channels = await window.electron.loadPlaylist(source.url)
+      const result = await window.electron.loadPlaylist(source.url)
+      // Handle both old (array) and new ({ channels, tvgUrl }) shapes
+      const channels = Array.isArray(result) ? result : result.channels
+      const tvgUrlFromM3u = Array.isArray(result) ? null : result.tvgUrl
       setChannels(channels)
+
+      // Auto-load EPG if we don't already have one configured
+      const currentEpgUrl = useStore.getState().epgUrl
+      if (!currentEpgUrl) {
+        autoLoadEpg(source.url, tvgUrlFromM3u)
+      }
     } catch (err) {
       setLoadError(err.message || 'Failed to load playlist')
     } finally {
       setLoading(false)
       setLoadProgress(null)
     }
+  }
+
+  async function autoLoadEpg(m3uUrl, tvgUrlFromHeader) {
+    // 1. Use tvg-url from M3U header if present
+    // 2. Otherwise probe common URL patterns
+    let epgUrl = tvgUrlFromHeader
+    if (!epgUrl) {
+      epgUrl = await window.electron.detectEpgUrl(m3uUrl)
+    }
+    if (!epgUrl) return
+
+    // Save and load it
+    setEpgUrl(epgUrl)
+    await window.electron.store.set('epgUrl', epgUrl)
+    loadEpg(epgUrl)
   }
 
   async function loadEpg(url) {

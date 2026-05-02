@@ -444,6 +444,43 @@ ipcMain.handle("play-stream", (_e, url, channelName) => {
     });
   });
 });
+ipcMain.handle("detect-epg-url", async (_e, m3uUrl) => {
+  const probe = (url) => new Promise((resolve) => {
+    try {
+      const lib = url.startsWith("https") ? require("https") : require("http");
+      const req = lib.request(url, { method: "HEAD", timeout: 5e3, rejectUnauthorized: false }, (res) => {
+        const ct = res.headers["content-type"] || "";
+        const ok = res.statusCode >= 200 && res.statusCode < 300 && (ct.includes("xml") || ct.includes("gzip") || ct.includes("octet") || url.endsWith(".gz"));
+        resolve(ok ? url : null);
+      });
+      req.on("error", () => resolve(null));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(null);
+      });
+      req.end();
+    } catch {
+      resolve(null);
+    }
+  });
+  const candidates = [];
+  if (m3uUrl.includes("get.php")) {
+    const xmltvUrl = m3uUrl.replace("get.php", "xmltv.php").replace(/&type=[^&]*/g, "").replace(/&output=[^&]*/g, "");
+    candidates.push(xmltvUrl);
+  }
+  const bare = m3uUrl.replace(/\?.*$/, "");
+  const base = bare.replace(/\/(get|playlist|channels|live|index)\.m3u[^/]*/i, "");
+  candidates.push(
+    bare.replace(/\.m3u[^?]*$/i, ".xml"),
+    bare.replace(/\.m3u[^?]*$/i, ".xml.gz"),
+    base + "/epg.xml.gz",
+    base + "/epg.xml",
+    base + "/xmltv.php"
+  );
+  const results = await Promise.all(candidates.map(probe));
+  const found = results.find((r) => r !== null) || null;
+  return found;
+});
 ipcMain.handle("fetch-url", (_e, url) => {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? require("https") : require("http");
@@ -542,8 +579,8 @@ ipcMain.handle("load-playlist", (event, url) => {
           sendProgress({ stage: "cache", message: "Using cached playlist" });
           try {
             const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
-            sendProgress({ stage: "done", channels: cached.length });
-            return resolve(cached);
+            sendProgress({ stage: "done", channelCount: cached.length, tvgUrl: cachedMeta.tvgUrl || null });
+            return resolve({ channels: cached, tvgUrl: cachedMeta.tvgUrl || null });
           } catch {
           }
         }
@@ -572,16 +609,18 @@ ipcMain.handle("load-playlist", (event, url) => {
         res.on("end", () => {
           sendProgress({ stage: "parsing", receivedBytes, totalBytes, channelCount });
           const fullText = Buffer.concat(chunks).toString("utf8");
+          const headerSnip = fullText.slice(0, 2e3);
+          const tvgUrl = headerSnip.match(/x-tvg-url="([^"]+)"/i)?.[1] || headerSnip.match(/url-tvg="([^"]+)"/i)?.[1] || null;
           setImmediate(() => {
             try {
               const channels = parseM3uIncremental(fullText);
-              sendProgress({ stage: "done", channelCount: channels.length });
+              sendProgress({ stage: "done", channelCount: channels.length, tvgUrl });
               try {
                 fs.writeFileSync(cacheFile, JSON.stringify(channels));
-                fs.writeFileSync(metaFile, JSON.stringify({ etag, url, cachedAt: Date.now() }));
+                fs.writeFileSync(metaFile, JSON.stringify({ etag, url, cachedAt: Date.now(), tvgUrl }));
               } catch {
               }
-              resolve(channels);
+              resolve({ channels, tvgUrl });
             } catch (e) {
               reject(e);
             }
@@ -599,8 +638,8 @@ ipcMain.handle("load-playlist", (event, url) => {
       try {
         const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
         if (cached?.length > 0) {
-          sendProgress({ stage: "cache", message: `Loaded ${cached.length.toLocaleString()} channels from cache`, channelCount: cached.length });
-          resolve(cached);
+          sendProgress({ stage: "cache", message: `Loaded ${cached.length.toLocaleString()} channels from cache`, channelCount: cached.length, tvgUrl: cachedMeta.tvgUrl || null });
+          resolve({ channels: cached, tvgUrl: cachedMeta.tvgUrl || null });
           setTimeout(() => {
             try {
               doReq(url, lib);
