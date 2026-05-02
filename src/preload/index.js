@@ -9,23 +9,26 @@ contextBridge.exposeInMainWorld('electron', {
   playStream: (url, channelName) => ipcRenderer.invoke('play-stream', url, channelName),
   fetchUrl: (url) => ipcRenderer.invoke('fetch-url', url),
 
-  // Chromecast
   cast: {
-    startDiscovery: () => ipcRenderer.invoke('cast-start-discovery'),
-    stopDiscovery: () => ipcRenderer.invoke('cast-stop-discovery'),
-    getDevices: () => ipcRenderer.invoke('cast-get-devices'),
-    play: (opts) => ipcRenderer.invoke('cast-play', opts),
-    pause: () => ipcRenderer.invoke('cast-pause'),
-    resume: () => ipcRenderer.invoke('cast-resume'),
-    stop: () => ipcRenderer.invoke('cast-stop'),
-    setVolume: (level) => ipcRenderer.invoke('cast-set-volume', level),
-    onDevicesUpdated: (cb) => ipcRenderer.on('cast-devices-updated', (_e, devices) => cb(devices)),
-    onMediaStatus: (cb) => ipcRenderer.on('cast-media-status', (_e, status) => cb(status)),
-    onDisconnected: (cb) => ipcRenderer.on('cast-disconnected', () => cb()),
+    startDiscovery:  ()       => ipcRenderer.invoke('cast-start-discovery'),
+    stopDiscovery:   ()       => ipcRenderer.invoke('cast-stop-discovery'),
+    getDevices:      ()       => ipcRenderer.invoke('cast-get-devices'),
+    play:            (opts)   => ipcRenderer.invoke('cast-play', opts),
+    pause:           ()       => ipcRenderer.invoke('cast-pause'),
+    resume:          ()       => ipcRenderer.invoke('cast-resume'),
+    stop:            ()       => ipcRenderer.invoke('cast-stop'),
+    setVolume:       (level)  => ipcRenderer.invoke('cast-set-volume', level),
+
+    onDevicesUpdated: (cb) => ipcRenderer.on('cast-devices-updated', (_e, d) => cb(d)),
+    onMediaStatus:    (cb) => ipcRenderer.on('cast-media-status',    (_e, s) => cb(s)),
+    onDisconnected:   (cb) => ipcRenderer.on('cast-disconnected',    ()      => cb()),
+    onReconnecting:   (cb) => ipcRenderer.on('cast-reconnecting',    ()      => cb()),
+    onReconnected:    (cb) => ipcRenderer.on('cast-reconnected',     ()      => cb()),
+    onError:          (cb) => ipcRenderer.on('cast-error',           (_e, e) => cb(e)),
     offAll: () => {
-      ipcRenderer.removeAllListeners('cast-devices-updated')
-      ipcRenderer.removeAllListeners('cast-media-status')
-      ipcRenderer.removeAllListeners('cast-disconnected')
+      ['cast-devices-updated','cast-media-status','cast-disconnected',
+       'cast-reconnecting','cast-reconnected','cast-error']
+        .forEach(ch => ipcRenderer.removeAllListeners(ch))
     },
   },
 })

@@ -8,11 +8,11 @@ export default function ChannelList() {
   const {
     getFilteredChannels, activeChannel, setActiveChannel,
     favorites, toggleFavorite, searchQuery, selectedCategory,
+    selectedDevice, setCastStatus, setCastError, aggressiveReconnect,
   } = useStore()
 
   const channels = getFilteredChannels()
   const [mpvError, setMpvError] = useState(null)
-  // Track dead streams locally: { [url]: true }
   const [deadStreams, setDeadStreams] = useState({})
 
   const parentRef = useRef(null)
@@ -27,11 +27,32 @@ export default function ChannelList() {
   const handlePlay = useCallback(async (channel) => {
     setActiveChannel(channel)
     setMpvError(null)
+
+    // If a Chromecast device is selected, cast instead of opening mpv
+    if (selectedDevice) {
+      setCastStatus('connecting')
+      setCastError(null)
+      const result = await window.electron.cast.play({
+        host: channel.url,   // will be overridden below
+        ...selectedDevice,
+        url: channel.url,
+        title: channel.name,
+        aggressive: aggressiveReconnect,
+      })
+      if (result?.ok) {
+        setCastStatus('playing')
+      } else {
+        setCastStatus('error')
+        setCastError(result?.error || 'Cast failed')
+      }
+      return
+    }
+
+    // Otherwise open in mpv
     const result = await window.electron?.playStream(channel.url, channel.name)
     if (result && !result.launched) {
       setMpvError(result.error || 'mpv failed to launch')
     } else if (result && result.error) {
-      // Stream failed (exit code 2 = bad stream)
       setDeadStreams((prev) => ({ ...prev, [channel.url]: true }))
     }
   }, [setActiveChannel])

@@ -24,6 +24,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 const { app, BrowserWindow, ipcMain } = require("electron");
 const { join } = require("path");
 const { spawn } = require("child_process");
+const os = require("os");
+const dgram = require("dgram");
 let store;
 async function getStore() {
   if (!store) {
@@ -40,11 +42,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#0f0f0f",
     titleBarStyle: "hidden",
-    titleBarOverlay: {
-      color: "#0f0f0f",
-      symbolColor: "#ffffff",
-      height: 40
-    },
+    titleBarOverlay: { color: "#0f0f0f", symbolColor: "#ffffff", height: 40 },
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -60,41 +58,173 @@ function createWindow() {
   }
   return win;
 }
-let castWindow = null;
+const MDNS_ADDR = "224.0.0.251";
+const MDNS_PORT = 5353;
+const CAST_QUERY = Buffer.from([
+  0,
+  0,
+  // ID: 0
+  0,
+  0,
+  // Flags: standard query
+  0,
+  1,
+  // QDCOUNT: 1
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  // ANCOUNT, NSCOUNT, ARCOUNT
+  // QNAME: _googlecast._tcp.local
+  11,
+  95,
+  103,
+  111,
+  111,
+  103,
+  108,
+  101,
+  99,
+  97,
+  115,
+  116,
+  // _googlecast
+  4,
+  95,
+  116,
+  99,
+  112,
+  // _tcp
+  5,
+  108,
+  111,
+  99,
+  97,
+  108,
+  // local
+  0,
+  // root
+  0,
+  12,
+  // QTYPE: PTR
+  0,
+  1
+  // QCLASS: IN
+]);
+let mdnsSocket = null;
 let discoveredDevices = [];
-let browser = null;
-let activeClient = null;
+let castWindow = null;
+let discoveryInterval = null;
+function getLocalInterfaces() {
+  const nets = os.networkInterfaces();
+  const addrs = [];
+  for (const ifaces of Object.values(nets)) {
+    for (const iface of ifaces) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        addrs.push(iface.address);
+      }
+    }
+  }
+  return addrs;
+}
+function parseFriendlyName(msg) {
+  const str = msg.toString("binary");
+  const fnMatch = str.match(/fn=([^\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f]+)/);
+  if (fnMatch) return fnMatch[1].replace(/[^\x20-\x7e]/g, "").trim();
+  const readable = [];
+  let i = 12;
+  while (i < str.length) {
+    const len = str.charCodeAt(i);
+    if (len === 0 || len > 63) break;
+    const label = str.slice(i + 1, i + 1 + len).replace(/[^\x20-\x7e]/g, "");
+    if (label && !label.startsWith("_")) readable.push(label);
+    i += 1 + len;
+  }
+  return readable[0] || null;
+}
+function startDiscovery(win) {
+  castWindow = win;
+  discoveredDevices = [];
+  if (mdnsSocket) {
+    try {
+      mdnsSocket.close();
+    } catch {
+    }
+    mdnsSocket = null;
+  }
+  if (discoveryInterval) {
+    clearInterval(discoveryInterval);
+    discoveryInterval = null;
+  }
+  const interfaces = getLocalInterfaces();
+  if (!interfaces.length) return;
+  interfaces.some((ip) => ip.startsWith("192.168.") || ip.startsWith("10.0."));
+  const bindAddr = interfaces.find((ip) => ip.startsWith("192.168.")) || interfaces.find((ip) => ip.startsWith("10.0.")) || interfaces[0];
+  const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  mdnsSocket = sock;
+  sock.on("error", (e) => console.error("mDNS socket error:", e.message));
+  sock.on("message", (msg, rinfo) => {
+    const srcIp = rinfo.address;
+    if (discoveredDevices.find((d) => d.host === srcIp)) return;
+    const name = parseFriendlyName(msg) || `Chromecast (${srcIp})`;
+    discoveredDevices.push({ name, host: srcIp, port: 8009 });
+    console.log("Discovered Chromecast:", name, srcIp);
+    castWindow?.webContents.send("cast-devices-updated", discoveredDevices);
+  });
+  sock.bind(MDNS_PORT, () => {
+    try {
+      sock.addMembership(MDNS_ADDR, bindAddr);
+      sock.setMulticastInterface(bindAddr);
+    } catch (e) {
+      console.error("mDNS membership error:", e.message);
+    }
+    const sendQuery = () => {
+      sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR, (e) => {
+        if (e) console.error("mDNS query error:", e.message);
+      });
+    };
+    sendQuery();
+    discoveryInterval = setInterval(sendQuery, 1e4);
+  });
+}
+function stopDiscovery() {
+  if (discoveryInterval) {
+    clearInterval(discoveryInterval);
+    discoveryInterval = null;
+  }
+  if (mdnsSocket) {
+    try {
+      mdnsSocket.close();
+    } catch {
+    }
+    mdnsSocket = null;
+  }
+}
 const CLIENT_ID = "sender-0";
 const DEFAULT_APP_ID = "CC1AD845";
 const MEDIA_NS = "urn:x-cast:com.google.cast.media";
-function startDiscovery() {
-  const mdns = require("mdns-js");
-  mdns.excludeInterface("0.0.0.0");
-  discoveredDevices = [];
-  if (browser) {
-    try {
-      browser.stop();
-    } catch {
-    }
+const RECEIVER_NS = "urn:x-cast:com.google.cast.receiver";
+const CONN_NS = "urn:x-cast:com.google.cast.tp.connection";
+const HB_NS = "urn:x-cast:com.google.cast.tp.heartbeat";
+let activeClient = null;
+let reconnectTimer = null;
+let currentCastOpts = null;
+function clearReconnect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   }
-  browser = mdns.createBrowser("_googlecast._tcp");
-  browser.on("ready", () => browser.discover());
-  browser.on("update", (data) => {
-    if (!data.addresses?.length) return;
-    const host = data.addresses[0];
-    const port = data.port || 8009;
-    const fnTag = data.txt?.find((t) => t.startsWith("fn="));
-    const name = fnTag ? fnTag.replace("fn=", "") : data.fullname?.replace("._googlecast._tcp.local", "") || host;
-    if (!discoveredDevices.find((d) => d.host === host)) {
-      discoveredDevices.push({ name, host, port });
-      castWindow?.webContents.send("cast-devices-updated", discoveredDevices);
-    }
-  });
-  browser.on("error", (e) => console.error("mDNS:", e.message));
 }
-function connectAndPlay({ host, port, url, title }) {
+function connectAndPlay(opts) {
+  currentCastOpts = opts;
+  return _connect(opts);
+}
+function _connect({ host, port, url, title, aggressive }) {
   return new Promise((resolve, reject) => {
     if (activeClient) {
+      clearReconnect();
       try {
         activeClient.close();
       } catch {
@@ -104,11 +234,19 @@ function connectAndPlay({ host, port, url, title }) {
     const castv2 = require("castv2");
     const client = new castv2.Client();
     activeClient = client;
+    const timeout = setTimeout(() => {
+      reject(new Error("Connection timed out"));
+      try {
+        client.close();
+      } catch {
+      }
+    }, 1e4);
     client.connect({ host, port: port || 8009 }, () => {
+      clearTimeout(timeout);
       const mkChan = (ns, dest = "receiver-0") => client.createChannel(CLIENT_ID, dest, ns, "JSON");
-      const conn = mkChan("urn:x-cast:com.google.cast.tp.connection");
-      const hb = mkChan("urn:x-cast:com.google.cast.tp.heartbeat");
-      const recv = mkChan("urn:x-cast:com.google.cast.receiver");
+      const conn = mkChan(CONN_NS);
+      const hb = mkChan(HB_NS);
+      const recv = mkChan(RECEIVER_NS);
       conn.send({ type: "CONNECT" });
       const hbTimer = setInterval(() => {
         try {
@@ -119,18 +257,29 @@ function connectAndPlay({ host, port, url, title }) {
       client._hbTimer = hbTimer;
       let reqId = 1;
       recv.send({ type: "LAUNCH", appId: DEFAULT_APP_ID, requestId: reqId++ });
+      let resolved = false;
       recv.on("message", (data) => {
+        if (data.type === "LAUNCH_ERROR") {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            reject(new Error("Launch failed"));
+          }
+          return;
+        }
         if (data.type !== "RECEIVER_STATUS") return;
-        const app2 = data.status?.applications?.[0];
-        if (!app2 || app2.appId !== DEFAULT_APP_ID) return;
-        const dest = app2.transportId || app2.sessionId;
-        const mconn = mkChan("urn:x-cast:com.google.cast.tp.connection", dest);
+        const appInfo = data.status?.applications?.[0];
+        if (!appInfo || appInfo.appId !== DEFAULT_APP_ID) return;
+        if (resolved) return;
+        resolved = true;
+        const dest = appInfo.transportId || appInfo.sessionId;
+        const mconn = mkChan(CONN_NS, dest);
         const media = mkChan(MEDIA_NS, dest);
         mconn.send({ type: "CONNECT" });
         media.send({
           type: "LOAD",
           requestId: reqId++,
-          sessionId: app2.sessionId,
+          sessionId: appInfo.sessionId,
           media: {
             contentId: url,
             contentType: "video/mp2t",
@@ -141,76 +290,88 @@ function connectAndPlay({ host, port, url, title }) {
           currentTime: 0
         });
         client._media = media;
+        client._recv = recv;
         client._reqId = reqId;
         media.on("message", (m) => {
           castWindow?.webContents.send("cast-media-status", m);
         });
         resolve({ ok: true });
       });
-      recv.on("message", (data) => {
-        if (data.type === "LAUNCH_ERROR") {
-          clearInterval(hbTimer);
-          reject(new Error("Chromecast app launch failed"));
-        }
-      });
     });
     client.on("error", (e) => {
+      clearTimeout(timeout);
       clearInterval(client._hbTimer);
       activeClient = null;
-      castWindow?.webContents.send("cast-disconnected");
-      reject(e);
+      castWindow?.webContents.send("cast-error", e.message);
+      _handleDisconnect();
+      if (!currentCastOpts) reject(e);
     });
     client.on("close", () => {
       clearInterval(client._hbTimer);
-      activeClient = null;
+      if (activeClient === client) activeClient = null;
       castWindow?.webContents.send("cast-disconnected");
+      _handleDisconnect();
     });
   });
 }
-function registerCastHandlers(win) {
+function _handleDisconnect() {
+  clearReconnect();
+  if (!currentCastOpts) return;
+  if (!currentCastOpts.aggressive) {
+    currentCastOpts = null;
+    return;
+  }
+  console.log("Cast disconnected — reconnecting in 3s (aggressive mode)");
+  castWindow?.webContents.send("cast-reconnecting");
+  reconnectTimer = setTimeout(() => {
+    if (!currentCastOpts) return;
+    _connect(currentCastOpts).then(() => castWindow?.webContents.send("cast-reconnected")).catch((e) => {
+      castWindow?.webContents.send("cast-error", e.message);
+      _handleDisconnect();
+    });
+  }, 3e3);
+}
+function sendMediaCmd(type, extra = {}) {
+  if (!activeClient?._media) return false;
+  activeClient._media.send({ type, requestId: activeClient._reqId++, mediaSessionId: 1, ...extra });
+  return true;
+}
+function stopCast() {
+  currentCastOpts = null;
+  clearReconnect();
+  sendMediaCmd("STOP");
+  try {
+    clearInterval(activeClient?._hbTimer);
+    activeClient?.close();
+  } catch {
+  }
+  activeClient = null;
+}
+function registerHandlers(win) {
   castWindow = win;
   ipcMain.handle("cast-start-discovery", () => {
-    startDiscovery();
+    startDiscovery(win);
     return discoveredDevices;
   });
-  ipcMain.handle("cast-stop-discovery", () => {
-    if (browser) {
-      try {
-        browser.stop();
-      } catch {
-      }
-      browser = null;
-    }
-  });
+  ipcMain.handle("cast-stop-discovery", () => stopDiscovery());
   ipcMain.handle("cast-get-devices", () => discoveredDevices);
   ipcMain.handle("cast-play", async (_e, opts) => {
     try {
-      return await connectAndPlay(opts);
+      await connectAndPlay(opts);
+      return { ok: true };
     } catch (e) {
       return { ok: false, error: e.message };
     }
   });
-  ipcMain.handle("cast-pause", () => {
-    activeClient?._media?.send({ type: "PAUSE", requestId: activeClient._reqId++, mediaSessionId: 1 });
-    return true;
-  });
-  ipcMain.handle("cast-resume", () => {
-    activeClient?._media?.send({ type: "PLAY", requestId: activeClient._reqId++, mediaSessionId: 1 });
-    return true;
-  });
+  ipcMain.handle("cast-pause", () => sendMediaCmd("PAUSE"));
+  ipcMain.handle("cast-resume", () => sendMediaCmd("PLAY"));
   ipcMain.handle("cast-stop", () => {
-    activeClient?._media?.send({ type: "STOP", requestId: activeClient._reqId++, mediaSessionId: 1 });
-    try {
-      clearInterval(activeClient?._hbTimer);
-      activeClient?.close();
-    } catch {
-    }
-    activeClient = null;
+    stopCast();
     return true;
   });
   ipcMain.handle("cast-set-volume", (_e, level) => {
     if (!activeClient) return false;
-    const recv = activeClient.createChannel(CLIENT_ID, "receiver-0", "urn:x-cast:com.google.cast.receiver", "JSON");
+    const recv = activeClient.createChannel(CLIENT_ID, "receiver-0", RECEIVER_NS, "JSON");
     recv.send({ type: "SET_VOLUME", volume: { level: Math.max(0, Math.min(1, level)) }, requestId: 99 });
     return true;
   });
@@ -218,25 +379,27 @@ function registerCastHandlers(win) {
 app.whenReady().then(async () => {
   await getStore();
   const win = createWindow();
-  registerCastHandlers(win);
+  registerHandlers(win);
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 app.on("window-all-closed", () => {
+  stopDiscovery();
+  stopCast();
   if (process.platform !== "darwin") app.quit();
 });
-ipcMain.handle("store-get", async (_e, key) => {
+ipcMain.handle("store-get", async (_e, k) => {
   const s = await getStore();
-  return s.get(key);
+  return s.get(k);
 });
-ipcMain.handle("store-set", async (_e, key, value) => {
+ipcMain.handle("store-set", async (_e, k, v) => {
   const s = await getStore();
-  s.set(key, value);
+  s.set(k, v);
 });
-ipcMain.handle("store-delete", async (_e, key) => {
+ipcMain.handle("store-delete", async (_e, k) => {
   const s = await getStore();
-  s.delete(key);
+  s.delete(k);
 });
 ipcMain.handle("play-stream", (_e, url, channelName) => {
   const MPV = "C:\\Program Files\\MPV Player\\mpv.exe";
@@ -275,12 +438,11 @@ ipcMain.handle("play-stream", (_e, url, channelName) => {
 ipcMain.handle("fetch-url", (_e, url) => {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? require("https") : require("http");
-    const opts = { timeout: 3e4, rejectUnauthorized: false };
-    const doRequest = (reqUrl, lib2) => {
-      const req = lib2.get(reqUrl, opts, (res) => {
+    const doReq = (u, l) => {
+      const req = l.get(u, { timeout: 3e4, rejectUnauthorized: false }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           const loc = res.headers.location;
-          return doRequest(loc, loc.startsWith("https") ? require("https") : require("http"));
+          return doReq(loc, loc.startsWith("https") ? require("https") : require("http"));
         }
         if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`HTTP ${res.statusCode}`));
         const chunks = [];
@@ -294,6 +456,6 @@ ipcMain.handle("fetch-url", (_e, url) => {
         reject(new Error("Request timed out"));
       });
     };
-    doRequest(url, lib);
+    doReq(url, lib);
   });
 });

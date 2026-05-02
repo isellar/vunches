@@ -11,38 +11,63 @@ import CastBar from './components/CastBar'
 export default function App() {
   const {
     sources, setSources, setChannels, setLoading, setLoadError,
-    isLoading, loadError, channels, setFavorites, setRecentlyWatched,
+    isLoading, loadError, setFavorites, setRecentlyWatched,
+    selectedDevice, selectDevice, setAggressiveReconnect, setCastDevices,
+    setCastStatus, setCastError,
   } = useStore()
 
   const [initializing, setInitializing] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
 
-  // Load persisted data on startup
   useEffect(() => {
     async function init() {
-      const savedSources = await window.electron?.store.get('sources') || []
-      const savedFavorites = await window.electron?.store.get('favorites') || []
-      const savedRecent = await window.electron?.store.get('recentlyWatched') || []
+      const [savedSources, savedFavorites, savedRecent, savedDevice, savedAggressive] =
+        await Promise.all([
+          window.electron.store.get('sources'),
+          window.electron.store.get('favorites'),
+          window.electron.store.get('recentlyWatched'),
+          window.electron.store.get('selectedDevice'),
+          window.electron.store.get('aggressiveReconnect'),
+        ])
 
-      setSources(savedSources)
-      setFavorites(savedFavorites)
-      setRecentlyWatched(savedRecent)
+      setSources(savedSources || [])
+      setFavorites(savedFavorites || [])
+      setRecentlyWatched(savedRecent || [])
+      if (savedDevice) selectDevice(savedDevice)
+      if (savedAggressive != null) setAggressiveReconnect(savedAggressive)
 
-      if (savedSources.length > 0) {
-        await loadSource(savedSources[0])
-      }
+      if (savedSources?.length > 0) await loadSource(savedSources[0])
       setInitializing(false)
     }
     init()
+
+    // Start cast discovery and wire up events
+    window.electron.cast.startDiscovery().then(devices => {
+      if (devices?.length) setCastDevices(devices)
+    })
+    window.electron.cast.onDevicesUpdated(setCastDevices)
+    window.electron.cast.onMediaStatus((s) => {
+      if (s.type === 'MEDIA_STATUS' && s.status?.[0]) {
+        const ps = s.status[0].playerState
+        if      (ps === 'PLAYING')             setCastStatus('playing')
+        else if (ps === 'PAUSED')              setCastStatus('paused')
+        else if (ps === 'IDLE' || ps === 'FINISHED') setCastStatus('idle')
+      }
+    })
+    window.electron.cast.onDisconnected(() => setCastStatus('idle'))
+    window.electron.cast.onReconnecting(() => setCastStatus('reconnecting'))
+    window.electron.cast.onReconnected(()  => setCastStatus('playing'))
+    window.electron.cast.onError((e)       => { setCastStatus('error'); setCastError(e) })
+
+    return () => window.electron.cast.offAll()
   }, [])
 
   async function loadSource(source) {
     setLoading(true)
     setLoadError(null)
     try {
-      const text = await window.electron?.fetchUrl(source.url)
-      const parsed = parseM3u(text)
-      setChannels(parsed)
+      const text = await window.electron.fetchUrl(source.url)
+      setChannels(parseM3u(text))
     } catch (err) {
       setLoadError(err.message || 'Failed to load playlist')
     } finally {
@@ -53,7 +78,7 @@ export default function App() {
   async function handleAddSource(source) {
     const updated = [source]
     setSources(updated)
-    await window.electron?.store.set('sources', updated)
+    await window.electron.store.set('sources', updated)
     await loadSource(source)
   }
 
@@ -65,9 +90,7 @@ export default function App() {
     )
   }
 
-  if (sources.length === 0) {
-    return <Setup onAdd={handleAddSource} />
-  }
+  if (sources.length === 0) return <Setup onAdd={handleAddSource} />
 
   return (
     <div className="flex flex-col h-screen bg-[#0f0f0f] text-gray-100 select-none">
@@ -92,16 +115,12 @@ export default function App() {
                 <p className="text-red-400 mb-2">Failed to load playlist</p>
                 <p className="text-gray-500 text-sm">{loadError}</p>
                 <div className="flex gap-3 justify-center mt-4">
-                  <button
-                    onClick={() => loadSource(sources[0])}
-                    className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm transition-colors"
-                  >
+                  <button onClick={() => loadSource(sources[0])}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm transition-colors">
                     Retry
                   </button>
-                  <button
-                    onClick={() => setShowSettings(true)}
-                    className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded text-sm transition-colors"
-                  >
+                  <button onClick={() => setShowSettings(true)}
+                    className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded text-sm transition-colors">
                     Change playlist
                   </button>
                 </div>
@@ -112,13 +131,9 @@ export default function App() {
         </main>
       </div>
 
-      {/* Cast bar — always visible at bottom when playlist loaded */}
       <CastBar />
 
-      {/* Settings panel — rendered as overlay */}
-      {showSettings && (
-        <Settings onClose={() => setShowSettings(false)} />
-      )}
+      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
     </div>
   )
 }
