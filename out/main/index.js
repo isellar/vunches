@@ -167,6 +167,7 @@ function startDiscovery(win) {
   sock.on("error", (e) => console.error("mDNS socket error:", e.message));
   sock.on("message", (msg, rinfo) => {
     const srcIp = rinfo.address;
+    if (getLocalInterfaces().includes(srcIp)) return;
     if (discoveredDevices.find((d) => d.host === srcIp)) return;
     const name = parseFriendlyName(msg) || `Chromecast (${srcIp})`;
     discoveredDevices.push({ name, host: srcIp, port: 8009 });
