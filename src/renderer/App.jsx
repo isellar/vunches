@@ -5,6 +5,7 @@ import Sidebar from './components/Sidebar'
 import ChannelList from './components/ChannelList'
 import Titlebar from './components/Titlebar'
 import Setup from './components/Setup'
+import Settings from './components/Settings'
 
 export default function App() {
   const {
@@ -13,6 +14,7 @@ export default function App() {
   } = useStore()
 
   const [initializing, setInitializing] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)
 
   // Load persisted data on startup
   useEffect(() => {
@@ -25,7 +27,6 @@ export default function App() {
       setFavorites(savedFavorites)
       setRecentlyWatched(savedRecent)
 
-      // Auto-load the first source if available
       if (savedSources.length > 0) {
         await loadSource(savedSources[0])
       }
@@ -38,14 +39,7 @@ export default function App() {
     setLoading(true)
     setLoadError(null)
     try {
-      let text
-      if (source.type === 'url') {
-        text = await window.electron?.fetchUrl(source.url)
-      } else {
-        // local file — read via fetch with file:// protocol
-        const res = await fetch(source.url)
-        text = await res.text()
-      }
+      const text = await window.electron?.fetchUrl(source.url)
       const parsed = parseM3u(text)
       setChannels(parsed)
     } catch (err) {
@@ -70,14 +64,16 @@ export default function App() {
     )
   }
 
-  // Show setup screen if no sources configured
   if (sources.length === 0) {
     return <Setup onAdd={handleAddSource} />
   }
 
   return (
     <div className="flex flex-col h-screen bg-[#0f0f0f] text-gray-100 select-none">
-      <Titlebar onReload={() => loadSource(sources[0])} />
+      <Titlebar
+        onReload={() => loadSource(sources[0])}
+        onOpenSettings={() => setShowSettings(true)}
+      />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <main className="flex-1 flex flex-col overflow-hidden">
@@ -94,18 +90,31 @@ export default function App() {
               <div className="text-center">
                 <p className="text-red-400 mb-2">Failed to load playlist</p>
                 <p className="text-gray-500 text-sm">{loadError}</p>
-                <button
-                  onClick={() => loadSource(sources[0])}
-                  className="mt-4 px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm transition-colors"
-                >
-                  Retry
-                </button>
+                <div className="flex gap-3 justify-center mt-4">
+                  <button
+                    onClick={() => loadSource(sources[0])}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm transition-colors"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    onClick={() => setShowSettings(true)}
+                    className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded text-sm transition-colors"
+                  >
+                    Change playlist
+                  </button>
+                </div>
               </div>
             </div>
           )}
           {!isLoading && !loadError && <ChannelList />}
         </main>
       </div>
+
+      {/* Settings panel — rendered as overlay */}
+      {showSettings && (
+        <Settings onClose={() => setShowSettings(false)} />
+      )}
     </div>
   )
 }
