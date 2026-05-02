@@ -71,40 +71,50 @@ ipcMain.handle('store-delete', async (_e, key) => {
 
 // --- IPC: play stream via mpv ---
 ipcMain.handle('play-stream', (_e, url, channelName) => {
-  const mpvPaths = [
-    'mpv',
-    'C:\\Program Files\\MPV Player\\mpv.exe',
-    'C:\\Program Files\\mpv\\mpv.exe',
-    'C:\\Program Files (x86)\\mpv\\mpv.exe',
-    join(app.getPath('userData'), 'mpv', 'mpv.exe'),
+  const MPV = 'C:\\Program Files\\MPV Player\\mpv.exe'
+
+  const args = [
+    url,
+    `--title=${channelName || 'Vunches'}`,
+    '--cache=yes',
+    '--cache-secs=10',
+    '--demuxer-max-bytes=50MiB',
+    '--hwdec=auto',
+    '--force-window=immediate',
+    '--ontop=no',
   ]
 
-  let launched = false
-  for (const mpvPath of mpvPaths) {
-    try {
-      const args = [
-        url,
-        `--title=${channelName || 'Vunches'}`,
-        '--cache=yes',
-        '--cache-secs=10',
-        '--demuxer-max-bytes=50MiB',
-        '--hwdec=auto',
-        '--force-window=yes',
-      ]
-      const proc = spawn(mpvPath, args, {
-        detached: true,
-        stdio: 'ignore',
-        shell: mpvPath === 'mpv',
-      })
-      proc.unref()
-      launched = true
-      break
-    } catch {
-      continue
-    }
-  }
+  return new Promise((resolve) => {
+    const proc = spawn(MPV, args, {
+      detached: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
 
-  return { launched }
+    // Capture stderr briefly to surface any mpv errors
+    let errOut = ''
+    proc.stderr.on('data', (d) => { errOut += d.toString() })
+
+    // Give mpv 3 seconds to either error out or start successfully
+    const timer = setTimeout(() => {
+      proc.stderr.destroy()
+      proc.unref()
+      resolve({ launched: true })
+    }, 3000)
+
+    proc.on('error', (e) => {
+      clearTimeout(timer)
+      console.error('mpv spawn error:', e.message)
+      resolve({ launched: false, error: e.message })
+    })
+
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        console.error('mpv exited with code', code, errOut)
+        resolve({ launched: false, error: errOut || `exit code ${code}` })
+      }
+    })
+  })
 })
 
 // --- IPC: fetch M3U (bypass CORS) ---

@@ -4,13 +4,13 @@ import { useStore } from '../store/useStore'
 export default function ChannelList() {
   const { getFilteredChannels, activeChannel, setActiveChannel, favorites, toggleFavorite, searchQuery, selectedCategory } = useStore()
   const channels = getFilteredChannels()
-  const [mpvError, setMpvError] = useState(false)
+  const [mpvError, setMpvError] = useState(null)
 
   const handlePlay = useCallback(async (channel) => {
     setActiveChannel(channel)
-    setMpvError(false)
+    setMpvError(null)
     const result = await window.electron?.playStream(channel.url, channel.name)
-    if (result && !result.launched) setMpvError(true)
+    if (result && !result.launched) setMpvError(result.error || 'mpv failed to launch')
   }, [setActiveChannel])
 
   const empty = channels.length === 0
@@ -18,13 +18,13 @@ export default function ChannelList() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* mpv not found banner */}
-      {mpvError && (
+      {mpvError !== null && (
         <div className="flex items-center gap-3 px-4 py-2.5 bg-amber-900/40 border-b border-amber-700/40 text-amber-300 text-sm flex-shrink-0">
           <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
           </svg>
-          <span>mpv not found. Install it with: <code className="bg-black/30 px-1 rounded">winget install shinchiro.mpv</code></span>
-          <button onClick={() => setMpvError(false)} className="ml-auto text-amber-500 hover:text-amber-300">×</button>
+          <span className="truncate">{mpvError?.includes('mpv') || mpvError?.includes('ENOENT') ? 'mpv not found.' : `Playback error: ${mpvError}`}</span>
+          <button onClick={() => setMpvError(null)} className="ml-auto flex-shrink-0 text-amber-500 hover:text-amber-300">×</button>
         </div>
       )}
       {/* List header */}
@@ -71,7 +71,6 @@ function ChannelRow({ channel, isActive, isFavorite, onPlay, onToggleFavorite })
 
   return (
     <div
-      onDoubleClick={onPlay}
       onClick={onPlay}
       className={`flex items-center px-4 py-2.5 cursor-pointer group transition-colors border-b border-white/3
         ${isActive
