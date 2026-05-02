@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useStore } from '../store/useStore'
 
-const ROW_HEIGHT = 56
+const ROW_HEIGHT = 68
 
 export default function ChannelList() {
   const {
@@ -74,11 +74,11 @@ export default function ChannelList() {
       )}
 
       {/* List header */}
-      <div className="flex items-center px-4 py-2 border-b border-white/5 flex-shrink-0">
-        <h2 className="text-sm font-medium text-gray-300">
+      <div className="flex items-center px-5 py-3 border-b border-white/5 flex-shrink-0">
+        <h2 className="text-sm font-semibold text-gray-200">
           {searchQuery ? `Results for "${searchQuery}"` : selectedCategory}
         </h2>
-        <span className="ml-2 text-xs text-gray-600">
+        <span className="ml-2.5 text-xs text-gray-600 tabular-nums">
           {channels.length.toLocaleString()} channel{channels.length !== 1 ? 's' : ''}
         </span>
       </div>
@@ -135,25 +135,25 @@ function ChannelRow({ channel, isActive, isFavorite, isDead, onPlay, onToggleFav
   return (
     <div
       onClick={onPlay}
-      className={`flex items-center px-4 h-full cursor-pointer group transition-colors border-b border-white/[0.03]
-        ${isDead ? 'opacity-40' : ''}
+      className={`flex items-center px-5 h-full cursor-pointer group transition-colors border-b border-white/[0.04]
+        ${isDead ? 'opacity-35' : ''}
         ${isActive
-          ? 'bg-purple-600/15 border-l-2 border-l-purple-500'
-          : 'hover:bg-white/5 border-l-2 border-l-transparent'
+          ? 'bg-purple-600/15 border-l-[3px] border-l-purple-500'
+          : 'hover:bg-white/[0.04] border-l-[3px] border-l-transparent'
         }`}
     >
       {/* Logo */}
-      <div className="w-8 h-8 flex-shrink-0 rounded overflow-hidden bg-white/5 flex items-center justify-center mr-3">
+      <div className="w-10 h-10 flex-shrink-0 rounded-lg overflow-hidden bg-white/5 flex items-center justify-center mr-4">
         {channel.tvgLogo && !imgError ? (
           <img
             src={channel.tvgLogo}
             alt=""
-            className="w-full h-full object-contain"
+            className="w-full h-full object-contain p-0.5"
             onError={() => setImgError(true)}
             loading="lazy"
           />
         ) : (
-          <svg className="w-4 h-4 text-gray-700" fill="currentColor" viewBox="0 0 24 24">
+          <svg className="w-5 h-5 text-gray-700" fill="currentColor" viewBox="0 0 24 24">
             <path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z" />
           </svg>
         )}
@@ -161,26 +161,27 @@ function ChannelRow({ channel, isActive, isFavorite, isDead, onPlay, onToggleFav
 
       {/* Name + group */}
       <div className="flex-1 min-w-0">
-        <p className={`text-sm truncate ${isActive ? 'text-purple-200 font-medium' : 'text-gray-200'}`}>
+        <p className={`text-sm font-medium truncate leading-snug
+          ${isActive ? 'text-purple-200' : 'text-gray-100'}`}>
           {channel.name}
-          {isDead && <span className="ml-2 text-xs text-red-500/70">unavailable</span>}
+          {isDead && <span className="ml-2 text-xs font-normal text-red-500/60">unavailable</span>}
         </p>
         {channel.group?.title && (
-          <p className="text-xs text-gray-600 truncate">{channel.group.title}</p>
+          <p className="text-xs text-gray-500 truncate mt-0.5">{channel.group.title}</p>
         )}
       </div>
 
       {/* Now playing bars */}
       {isActive && !isDead && (
-        <div className="flex items-end gap-0.5 mr-3 h-4">
-          {[1, 2, 3].map((i) => (
+        <div className="flex items-end gap-[3px] mr-4 h-5">
+          {[1, 2, 3, 2].map((h, i) => (
             <div
               key={i}
-              className="w-0.5 bg-purple-400 rounded animate-pulse"
+              className="w-[3px] bg-purple-400 rounded-full animate-pulse"
               style={{
-                height: `${6 + i * 3}px`,
-                animationDelay: `${i * 0.15}s`,
-                animationDuration: '0.8s',
+                height: `${6 + h * 3}px`,
+                animationDelay: `${i * 0.12}s`,
+                animationDuration: '0.9s',
               }}
             />
           ))}
@@ -190,8 +191,9 @@ function ChannelRow({ channel, isActive, isFavorite, isDead, onPlay, onToggleFav
       {/* Favorite button */}
       <button
         onClick={(e) => { e.stopPropagation(); onToggleFavorite() }}
-        className={`flex-shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity
-          ${isFavorite ? '!opacity-100 text-pink-400' : 'text-gray-600 hover:text-pink-400'}`}
+        className={`flex-shrink-0 p-1.5 rounded-lg transition-all
+          opacity-0 group-hover:opacity-100
+          ${isFavorite ? '!opacity-100 text-pink-400 hover:text-pink-300' : 'text-gray-600 hover:text-pink-400 hover:bg-white/5'}`}
         title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
       >
         <svg className="w-4 h-4" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">

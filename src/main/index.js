@@ -77,12 +77,22 @@ function getLocalInterfaces() {
   const addrs = []
   for (const ifaces of Object.values(nets)) {
     for (const iface of ifaces) {
-      if (iface.family === 'IPv4' && !iface.internal) {
-        addrs.push(iface.address)
-      }
+      if (iface.family === 'IPv4') addrs.push(iface.address)
     }
   }
   return addrs
+}
+
+// Cached local IPs — refresh every 30s in case network changes
+let _cachedLocalIPs = null
+let _localIPsTime = 0
+function _localIPs() {
+  const now = Date.now()
+  if (!_cachedLocalIPs || now - _localIPsTime > 30000) {
+    _cachedLocalIPs = getLocalInterfaces()
+    _localIPsTime = now
+  }
+  return _cachedLocalIPs
 }
 
 function parseFriendlyName(msg) {
@@ -135,8 +145,8 @@ function startDiscovery(win) {
 
   sock.on('message', (msg, rinfo) => {
     const srcIp = rinfo.address
-    // Ignore our own machine's response
-    if (getLocalInterfaces().includes(srcIp)) return
+    // Ignore our own machine's responses (check all interfaces, cached)
+    if (_localIPs().includes(srcIp)) return
     if (discoveredDevices.find(d => d.host === srcIp)) return
 
     const name = parseFriendlyName(msg) || `Chromecast (${srcIp})`
