@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useStore } from '../store/useStore'
 
 export default function Settings({ onClose }) {
-  const { sources, setSources, setChannels, setLoading, setLoadError } = useStore()
+  const { sources, setSources, setChannels, setLoading, setLoadError,
+          epgUrl, setEpgUrl, setEpg, setEpgStatus, setEpgError } = useStore()
   const current = sources[0] || null
 
   const [url, setUrl] = useState(current?.url || '')
@@ -10,6 +11,42 @@ export default function Settings({ onClose }) {
   const [loading, setLocalLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
+
+  const [epgInput, setEpgInput] = useState(epgUrl || '')
+  const [epgLoading, setEpgLoading] = useState(false)
+  const [epgError, setEpgErr] = useState('')
+  const [epgSuccess, setEpgSuccess] = useState(false)
+
+  async function handleSaveEpg(e) {
+    e.preventDefault()
+    const trimmed = epgInput.trim()
+    if (!trimmed) return
+    setEpgLoading(true)
+    setEpgErr('')
+    setEpgSuccess(false)
+    setEpgStatus('loading')
+    try {
+      const data = await window.electron.loadEpg(trimmed)
+      setEpg(data)
+      setEpgUrl(trimmed)
+      setEpgStatus('ready')
+      await window.electron.store.set('epgUrl', trimmed)
+      setEpgSuccess(true)
+    } catch (err) {
+      setEpgStatus('error')
+      setEpgErr(err.message || 'Failed to load EPG')
+    } finally {
+      setEpgLoading(false)
+    }
+  }
+
+  async function handleClearEpg() {
+    setEpg({})
+    setEpgUrl('')
+    setEpgStatus('idle')
+    setEpgInput('')
+    await window.electron.store.set('epgUrl', '')
+  }
 
   async function handleSave(e) {
     e.preventDefault()
@@ -124,6 +161,50 @@ export default function Settings({ onClose }) {
               >
                 {loading ? 'Loading...' : current ? 'Update Playlist' : 'Load Playlist'}
               </button>
+            </form>
+          </section>
+
+          {/* EPG Source */}
+          <section>
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">
+              EPG / TV Guide
+            </h3>
+            <p className="text-xs text-gray-600 mb-3">
+              XMLTV URL from your provider — enables now/next info and the TV guide view.
+            </p>
+            <form onSubmit={handleSaveEpg} className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">XMLTV URL</label>
+                <input
+                  type="url"
+                  value={epgInput}
+                  onChange={(e) => { setEpgInput(e.target.value); setEpgSuccess(false); setEpgErr('') }}
+                  placeholder="https://example.com/epg.xml or epg.xml.gz"
+                  className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm
+                             text-gray-200 placeholder-gray-700 outline-none
+                             focus:border-purple-500/60 transition-colors"
+                />
+              </div>
+              {epgError && <p className="text-red-400 text-xs">{epgError}</p>}
+              {epgSuccess && <p className="text-green-400 text-xs">EPG loaded successfully</p>}
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={epgLoading || !epgInput.trim()}
+                  className="flex-1 bg-purple-600 hover:bg-purple-500 disabled:opacity-40
+                             disabled:cursor-not-allowed text-white font-medium py-2 rounded-lg
+                             text-sm transition-colors"
+                >
+                  {epgLoading ? 'Loading EPG...' : epgUrl ? 'Update EPG' : 'Load EPG'}
+                </button>
+                {epgUrl && (
+                  <button type="button" onClick={handleClearEpg}
+                    className="px-3 py-2 border border-white/10 text-gray-400 hover:text-gray-200
+                               rounded-lg text-sm transition-colors">
+                    Clear
+                  </button>
+                )}
+              </div>
             </form>
           </section>
 

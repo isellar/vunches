@@ -7,6 +7,7 @@ import Setup from './components/Setup'
 import Settings from './components/Settings'
 import CastBar from './components/CastBar'
 import LoadingScreen from './components/LoadingScreen'
+import EpgGuide from './components/EpgGuide'
 
 export default function App() {
   const {
@@ -14,24 +15,29 @@ export default function App() {
     isLoading, loadError, setFavorites, setRecentlyWatched,
     selectedDevice, selectDevice, setAggressiveReconnect, setCastDevices,
     setCastStatus, setCastError,
+    setEpg, setEpgUrl, setEpgStatus, setEpgError, showGuide,
   } = useStore()
 
   const [initializing, setInitializing] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
-  const [loadProgress, setLoadProgress] = useState(null) // { stage, receivedBytes, totalBytes, channelCount, message }
+  const [loadProgress, setLoadProgress] = useState(null)
 
   useEffect(() => {
-    // Wire up playlist progress events
     window.electron.onPlaylistProgress((data) => setLoadProgress(data))
+    window.electron.onEpgProgress((data) => {
+      if (data.stage === 'done') setEpgStatus('ready')
+      else if (data.stage !== 'cache') setEpgStatus('loading')
+    })
 
     async function init() {
-      const [savedSources, savedFavorites, savedRecent, savedDevice, savedAggressive] =
+      const [savedSources, savedFavorites, savedRecent, savedDevice, savedAggressive, savedEpgUrl] =
         await Promise.all([
           window.electron.store.get('sources'),
           window.electron.store.get('favorites'),
           window.electron.store.get('recentlyWatched'),
           window.electron.store.get('selectedDevice'),
           window.electron.store.get('aggressiveReconnect'),
+          window.electron.store.get('epgUrl'),
         ])
 
       setSources(savedSources || [])
@@ -39,8 +45,10 @@ export default function App() {
       setRecentlyWatched(savedRecent || [])
       if (savedDevice) selectDevice(savedDevice)
       if (savedAggressive != null) setAggressiveReconnect(savedAggressive)
+      if (savedEpgUrl) setEpgUrl(savedEpgUrl)
 
       if (savedSources?.length > 0) await loadSource(savedSources[0])
+      if (savedEpgUrl) loadEpg(savedEpgUrl)
       setInitializing(false)
     }
     init()
@@ -66,6 +74,7 @@ export default function App() {
     return () => {
       window.electron.cast.offAll()
       window.electron.offPlaylistProgress()
+      window.electron.offEpgProgress()
     }
   }, [])
 
@@ -81,6 +90,19 @@ export default function App() {
     } finally {
       setLoading(false)
       setLoadProgress(null)
+    }
+  }
+
+  async function loadEpg(url) {
+    setEpgStatus('loading')
+    setEpgError(null)
+    try {
+      const data = await window.electron.loadEpg(url)
+      setEpg(data)
+      setEpgStatus('ready')
+    } catch (err) {
+      setEpgStatus('error')
+      setEpgError(err.message)
     }
   }
 
@@ -109,7 +131,7 @@ export default function App() {
       />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className="flex-1 flex flex-col overflow-hidden relative">
           {isLoading && (
             <LoadingScreen progress={loadProgress} />
           )}
@@ -132,6 +154,7 @@ export default function App() {
             </div>
           )}
           {!isLoading && !loadError && <ChannelList />}
+          {showGuide && <EpgGuide />}
         </main>
       </div>
 

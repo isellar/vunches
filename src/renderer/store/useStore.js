@@ -16,6 +16,31 @@ export const useStore = create((set, get) => ({
   favorites: [],
   recentlyWatched: [],
 
+  // --- EPG ---
+  epg: {},              // { [tvgId]: [ { title, desc, start, stop } ] }
+  epgUrl: '',
+  epgStatus: 'idle',   // idle | loading | ready | error
+  epgError: null,
+  showGuide: false,
+
+  setEpg: (epg) => set({ epg }),
+  setEpgUrl: (epgUrl) => set({ epgUrl }),
+  setEpgStatus: (epgStatus) => set({ epgStatus }),
+  setEpgError: (epgError) => set({ epgError }),
+  setShowGuide: (showGuide) => set({ showGuide }),
+
+  // Get now/next for a channel by its tvg-id
+  getNowNext: (tvgId) => {
+    if (!tvgId) return { now: null, next: null }
+    const { epg } = get()
+    const progs = epg[tvgId]
+    if (!progs?.length) return { now: null, next: null }
+    const now = Date.now()
+    const idx = progs.findIndex(p => p.start <= now && p.stop > now)
+    if (idx === -1) return { now: null, next: progs.find(p => p.start > now) || null }
+    return { now: progs[idx], next: progs[idx + 1] || null }
+  },
+
   // --- Cast ---
   castDevices: [],
   selectedDevice: null,       // { name, host, port } — persisted

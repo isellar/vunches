@@ -1,7 +1,7 @@
 import { useStore } from '../store/useStore'
 
 export default function Titlebar({ onReload, onOpenSettings }) {
-  const { searchQuery, setSearchQuery, channels } = useStore()
+  const { searchQuery, setSearchQuery, channels, showGuide, setShowGuide, epgStatus } = useStore()
 
   return (
     <div className="drag-region flex items-center h-14 px-5 bg-[#0f0f0f] border-b border-white/5 flex-shrink-0 gap-4">
@@ -51,6 +51,24 @@ export default function Titlebar({ onReload, onOpenSettings }) {
       <span className="no-drag text-gray-600 text-xs flex-shrink-0 hidden sm:block">
         {channels.length.toLocaleString()} channels
       </span>
+
+      {/* Guide button */}
+      {epgStatus === 'ready' && (
+        <button
+          onClick={() => setShowGuide(!showGuide)}
+          title="TV Guide"
+          className={`no-drag flex items-center gap-1.5 transition-colors px-2.5 py-1.5 rounded-lg flex-shrink-0
+            ${showGuide
+              ? 'text-purple-300 bg-purple-600/20 hover:bg-purple-600/30'
+              : 'text-gray-500 hover:text-gray-200 hover:bg-white/6'}`}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+          <span className="text-xs hidden md:block">Guide</span>
+        </button>
+      )}
 
       {/* Reload button */}
       <button

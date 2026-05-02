@@ -1,19 +1,22 @@
 import { useCallback, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useStore } from '../store/useStore'
-
-const ROW_HEIGHT = 68
+import { NowNextBadge } from './NowNext'
 
 export default function ChannelList() {
   const {
     getFilteredChannels, activeChannel, setActiveChannel,
     favorites, toggleFavorite, searchQuery, selectedCategory,
     selectedDevice, setCastStatus, setCastError, aggressiveReconnect,
+    epgStatus, showGuide,
   } = useStore()
 
   const channels = getFilteredChannels()
   const [mpvError, setMpvError] = useState(null)
   const [deadStreams, setDeadStreams] = useState({})
+
+  const hasEpg = epgStatus === 'ready'
+  const ROW_HEIGHT = hasEpg ? 78 : 68
 
   const parentRef = useRef(null)
 
@@ -116,6 +119,7 @@ export default function ChannelList() {
                     isActive={activeChannel?.url === channel.url}
                     isFavorite={favorites.includes(channel.url)}
                     isDead={!!deadStreams[channel.url]}
+                    hasEpg={hasEpg}
                     onPlay={() => handlePlay(channel)}
                     onToggleFavorite={() => toggleFavorite(channel.url)}
                   />
@@ -129,7 +133,7 @@ export default function ChannelList() {
   )
 }
 
-function ChannelRow({ channel, isActive, isFavorite, isDead, onPlay, onToggleFavorite }) {
+function ChannelRow({ channel, isActive, isFavorite, isDead, hasEpg, onPlay, onToggleFavorite }) {
   const [imgError, setImgError] = useState(false)
 
   return (
@@ -159,16 +163,17 @@ function ChannelRow({ channel, isActive, isFavorite, isDead, onPlay, onToggleFav
         )}
       </div>
 
-      {/* Name + group */}
-      <div className="flex-1 min-w-0">
+      {/* Name + group + now/next */}
+      <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5">
         <p className={`text-sm font-medium truncate leading-snug
           ${isActive ? 'text-purple-200' : 'text-gray-100'}`}>
           {channel.name}
           {isDead && <span className="ml-2 text-xs font-normal text-red-500/60">unavailable</span>}
         </p>
-        {channel.group?.title && (
-          <p className="text-xs text-gray-500 truncate mt-0.5">{channel.group.title}</p>
+        {!hasEpg && channel.group?.title && (
+          <p className="text-xs text-gray-500 truncate">{channel.group.title}</p>
         )}
+        {hasEpg && <NowNextBadge tvgId={channel.tvgId} />}
       </div>
 
       {/* Now playing bars */}
