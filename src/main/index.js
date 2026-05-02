@@ -111,7 +111,9 @@ ipcMain.handle('play-stream', (_e, url, channelName) => {
       clearTimeout(timer)
       if (code !== 0) {
         console.error('mpv exited with code', code, errOut)
-        resolve({ launched: false, error: errOut || `exit code ${code}` })
+        // code 2 = bad stream/URL; launched=true so we don't show the mpv banner,
+        // but error is set so the renderer can mark the stream dead
+        resolve({ launched: true, error: errOut || `exit code ${code}` })
       }
     })
   })

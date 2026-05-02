@@ -116,7 +116,7 @@ ipcMain.handle("play-stream", (_e, url, channelName) => {
       clearTimeout(timer);
       if (code !== 0) {
         console.error("mpv exited with code", code, errOut);
-        resolve({ launched: false, error: errOut || `exit code ${code}` });
+        resolve({ launched: true, error: errOut || `exit code ${code}` });
       }
     });
   });
