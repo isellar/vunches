@@ -122,12 +122,20 @@ function getLocalInterfaces() {
   const addrs = [];
   for (const ifaces of Object.values(nets)) {
     for (const iface of ifaces) {
-      if (iface.family === "IPv4" && !iface.internal) {
-        addrs.push(iface.address);
-      }
+      if (iface.family === "IPv4") addrs.push(iface.address);
     }
   }
   return addrs;
+}
+let _cachedLocalIPs = null;
+let _localIPsTime = 0;
+function _localIPs() {
+  const now = Date.now();
+  if (!_cachedLocalIPs || now - _localIPsTime > 3e4) {
+    _cachedLocalIPs = getLocalInterfaces();
+    _localIPsTime = now;
+  }
+  return _cachedLocalIPs;
 }
 function parseFriendlyName(msg) {
   const str = msg.toString("binary");
@@ -167,7 +175,7 @@ function startDiscovery(win) {
   sock.on("error", (e) => console.error("mDNS socket error:", e.message));
   sock.on("message", (msg, rinfo) => {
     const srcIp = rinfo.address;
-    if (getLocalInterfaces().includes(srcIp)) return;
+    if (_localIPs().includes(srcIp)) return;
     if (discoveredDevices.find((d) => d.host === srcIp)) return;
     const name = parseFriendlyName(msg) || `Chromecast (${srcIp})`;
     discoveredDevices.push({ name, host: srcIp, port: 8009 });

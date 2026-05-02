@@ -14,7 +14,7 @@ export default function Titlebar({ onReload, onOpenSettings }) {
       {/* Search bar — takes remaining space up to a max */}
       <div className="no-drag flex-1 max-w-lg">
         <div className="relative">
-          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none"
+          <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none"
             fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
               d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -25,7 +25,7 @@ export default function Titlebar({ onReload, onOpenSettings }) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-white/6 text-sm text-gray-200 placeholder-gray-600
-                       rounded-lg pl-9 pr-8 py-2 outline-none border border-white/8
+                       rounded-lg pl-10 pr-8 py-2 outline-none border border-white/8
                        focus:border-purple-500/60 focus:bg-white/8 transition-colors"
           />
           {searchQuery && (
