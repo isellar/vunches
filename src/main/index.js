@@ -120,9 +120,31 @@ ipcMain.handle('play-stream', (_e, url, channelName) => {
 })
 
 // --- IPC: fetch M3U (bypass CORS) ---
-ipcMain.handle('fetch-url', async (_e, url) => {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const text = await res.text()
-  return text
+ipcMain.handle('fetch-url', (_e, url) => {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https') ? require('https') : require('http')
+    const request = lib.get(url, { timeout: 30000 }, (res) => {
+      // Follow redirects
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        ipcMain.emit('fetch-url', null, res.headers.location)
+        const lib2 = res.headers.location.startsWith('https') ? require('https') : require('http')
+        lib2.get(res.headers.location, { timeout: 30000 }, (res2) => {
+          const chunks = []
+          res2.on('data', (c) => chunks.push(c))
+          res2.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+          res2.on('error', reject)
+        }).on('error', reject)
+        return
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`HTTP ${res.statusCode}`))
+      }
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      res.on('error', reject)
+    })
+    request.on('error', reject)
+    request.on('timeout', () => { request.destroy(); reject(new Error('Request timed out')) })
+  })
 })
