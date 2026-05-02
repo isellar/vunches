@@ -6,6 +6,7 @@ import ChannelList from './components/ChannelList'
 import Titlebar from './components/Titlebar'
 import Setup from './components/Setup'
 import Settings from './components/Settings'
+import CastBar from './components/CastBar'
 
 export default function App() {
   const {
@@ -110,6 +111,9 @@ export default function App() {
           {!isLoading && !loadError && <ChannelList />}
         </main>
       </div>
+
+      {/* Cast bar — always visible at bottom when playlist loaded */}
+      <CastBar />
 
       {/* Settings panel — rendered as overlay */}
       {showSettings && (
