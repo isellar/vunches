@@ -25,8 +25,9 @@ export default function Titlebar({ onReload, onOpenSettings }) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-white/6 text-sm text-gray-200 placeholder-gray-600
-                       rounded-lg pl-10 pr-8 py-2 outline-none border border-white/8
+                       rounded-lg pr-8 py-2 outline-none border border-white/8
                        focus:border-purple-500/60 focus:bg-white/8 transition-colors"
+            style={{ paddingLeft: '2.25rem' }}
           />
           {searchQuery && (
             <button
