@@ -384,30 +384,42 @@ function startStreamProxy(streamUrl, deviceHost) {
         console.error("Proxy server error:", e.message);
         resolve(null);
       });
-      server.listen(0, "0.0.0.0", () => {
-        clearTimeout(giveUp);
-        proxyPort = server.address().port;
-        proxyServer = server;
-        const lanIp = getLocalLanIp(deviceHost);
-        console.log("Proxy listening on port", proxyPort, "| LAN IP:", lanIp, "| Device:", deviceHost);
-        if (!lanIp) {
-          console.warn("Proxy: no LAN IP found, falling back to direct");
-          server.close();
-          proxyServer = null;
-          proxyPort = null;
-          return resolve(null);
-        }
-        const { exec } = require("child_process");
-        exec(
-          `netsh advfirewall firewall add rule name="Vunches Stream Proxy" dir=in action=allow protocol=TCP localport=${proxyPort}`,
-          (err) => {
-            if (err) console.warn("Firewall rule failed (try running as admin):", err.message);
+      const tryPort = (port) => {
+        server.listen(port, "0.0.0.0", () => {
+          clearTimeout(giveUp);
+          proxyPort = server.address().port;
+          proxyServer = server;
+          const lanIp = getLocalLanIp(deviceHost);
+          console.log("Proxy listening on port", proxyPort, "| LAN IP:", lanIp, "| Device:", deviceHost);
+          if (!lanIp) {
+            console.warn("Proxy: no LAN IP found, falling back to direct");
+            server.close();
+            proxyServer = null;
+            proxyPort = null;
+            return resolve(null);
           }
-        );
-        const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
-        console.log("Stream proxy ready:", proxyUrl);
-        resolve(proxyUrl);
+          const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
+          console.log("Stream proxy ready:", proxyUrl);
+          resolve(proxyUrl);
+        });
+      };
+      server.once("error", (e) => {
+        if (e.code === "EADDRINUSE") {
+          console.log("Port 9234 in use, trying random port");
+          server.removeAllListeners("error");
+          server.on("error", (e2) => {
+            clearTimeout(giveUp);
+            console.error("Proxy server error:", e2.message);
+            resolve(null);
+          });
+          tryPort(0);
+        } else {
+          clearTimeout(giveUp);
+          console.error("Proxy server error:", e.message);
+          resolve(null);
+        }
       });
+      tryPort(9234);
     } catch (e) {
       clearTimeout(giveUp);
       console.error("Proxy setup error:", e.message);
@@ -428,6 +440,18 @@ function stopStreamProxy() {
     proxyPort = null;
     proxyStreamUrl = null;
   }
+}
+function ensureFirewallRule() {
+  const { exec } = require("child_process");
+  exec('netsh advfirewall firewall show rule name="Vunches Stream Proxy"', (err, stdout) => {
+    if (!err && stdout.includes("Vunches Stream Proxy")) return;
+    exec(
+      'netsh advfirewall firewall add rule name="Vunches Stream Proxy" dir=in action=allow protocol=TCP localport=9234',
+      (e) => {
+        if (e) console.warn("Could not add firewall rule (not admin). Chromecast proxy may be blocked.");
+      }
+    );
+  });
 }
 const CLIENT_ID = "sender-0";
 const DEFAULT_APP_ID = "CC1AD845";
@@ -697,6 +721,7 @@ function registerHandlers(win) {
 }
 app.whenReady().then(async () => {
   await getStore();
+  ensureFirewallRule();
   const win = createWindow();
   registerHandlers(win);
   app.on("activate", () => {
