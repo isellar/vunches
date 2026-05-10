@@ -331,72 +331,88 @@ function getLocalLanIp(targetDeviceIp) {
   return candidates[0] || null;
 }
 function startStreamProxy(streamUrl, deviceHost) {
-  return new Promise((resolve, reject) => {
-    if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
-      const lanIp = getLocalLanIp(deviceHost);
-      return resolve(lanIp ? `http://${lanIp}:${proxyPort}/stream` : null);
-    }
-    if (proxyServer) {
-      try {
-        proxyServer.close();
-      } catch {
-      }
-      proxyServer = null;
-      proxyPort = null;
-    }
-    proxyStreamUrl = streamUrl;
-    const http = require("http");
-    const https = require("https");
-    const server = http.createServer((req, res) => {
-      if (req.url !== "/stream") {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      console.log("Proxy: Chromecast fetching stream from", streamUrl.slice(0, 80));
-      const lib = streamUrl.startsWith("https") ? https : http;
-      const upstream = lib.get(streamUrl, { rejectUnauthorized: false, timeout: 15e3 }, (upstream2) => {
-        const ct = upstream2.headers["content-type"] || "video/mp2t";
-        res.writeHead(upstream2.statusCode || 200, {
-          "Content-Type": ct,
-          "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "no-cache",
-          "Transfer-Encoding": "chunked"
-        });
-        upstream2.pipe(res);
-        res.on("close", () => upstream2.destroy());
-      });
-      upstream.on("error", (e) => {
-        console.error("Proxy upstream error:", e.message);
-        res.writeHead(502);
-        res.end();
-      });
-    });
-    server.listen(0, "0.0.0.0", () => {
-      proxyPort = server.address().port;
-      proxyServer = server;
-      const lanIp = getLocalLanIp(deviceHost);
-      console.log("Proxy server listening on port", proxyPort, "| LAN IP:", lanIp, "| Device:", deviceHost);
-      const { exec } = require("child_process");
-      exec(
-        `netsh advfirewall firewall add rule name="Vunches Stream Proxy" dir=in action=allow protocol=TCP localport=${proxyPort}`,
-        (err) => {
-          if (err) console.warn("Firewall rule add failed (may need admin):", err.message);
-        }
-      );
-      if (!lanIp) {
-        console.warn("Proxy: could not determine LAN IP — falling back to direct URL");
-        server.close();
-        return resolve(null);
-      }
-      const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
-      console.log("Stream proxy started:", proxyUrl, "→", streamUrl.slice(0, 80));
-      resolve(proxyUrl);
-    });
-    server.on("error", (e) => {
-      console.error("Proxy server error:", e.message);
+  return new Promise((resolve) => {
+    const giveUp = setTimeout(() => {
+      console.warn("Proxy: timed out starting, falling back to direct URL");
       resolve(null);
-    });
+    }, 3e3);
+    try {
+      if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
+        clearTimeout(giveUp);
+        const lanIp = getLocalLanIp(deviceHost);
+        return resolve(lanIp ? `http://${lanIp}:${proxyPort}/stream` : null);
+      }
+      if (proxyServer) {
+        try {
+          proxyServer.close();
+        } catch {
+        }
+        proxyServer = null;
+        proxyPort = null;
+      }
+      proxyStreamUrl = streamUrl;
+      const http = require("http");
+      const https = require("https");
+      const server = http.createServer((req, res) => {
+        if (req.url !== "/stream") {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        console.log("Proxy: Chromecast fetching stream...");
+        const lib = streamUrl.startsWith("https") ? https : http;
+        const upstream = lib.get(streamUrl, { rejectUnauthorized: false, timeout: 3e4 }, (upRes) => {
+          res.writeHead(upRes.statusCode || 200, {
+            "Content-Type": "video/mp2t",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache",
+            "Transfer-Encoding": "chunked"
+          });
+          upRes.pipe(res);
+          res.on("close", () => upRes.destroy());
+        });
+        upstream.on("error", (e) => {
+          console.error("Proxy upstream error:", e.message);
+          if (!res.headersSent) {
+            res.writeHead(502);
+            res.end();
+          }
+        });
+      });
+      server.on("error", (e) => {
+        clearTimeout(giveUp);
+        console.error("Proxy server error:", e.message);
+        resolve(null);
+      });
+      server.listen(0, "0.0.0.0", () => {
+        clearTimeout(giveUp);
+        proxyPort = server.address().port;
+        proxyServer = server;
+        const lanIp = getLocalLanIp(deviceHost);
+        console.log("Proxy listening on port", proxyPort, "| LAN IP:", lanIp, "| Device:", deviceHost);
+        if (!lanIp) {
+          console.warn("Proxy: no LAN IP found, falling back to direct");
+          server.close();
+          proxyServer = null;
+          proxyPort = null;
+          return resolve(null);
+        }
+        const { exec } = require("child_process");
+        exec(
+          `netsh advfirewall firewall add rule name="Vunches Stream Proxy" dir=in action=allow protocol=TCP localport=${proxyPort}`,
+          (err) => {
+            if (err) console.warn("Firewall rule failed (try running as admin):", err.message);
+          }
+        );
+        const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
+        console.log("Stream proxy ready:", proxyUrl);
+        resolve(proxyUrl);
+      });
+    } catch (e) {
+      clearTimeout(giveUp);
+      console.error("Proxy setup error:", e.message);
+      resolve(null);
+    }
   });
 }
 function stopStreamProxy() {
