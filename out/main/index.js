@@ -309,13 +309,25 @@ function clearReconnect() {
     reconnectTimer = null;
   }
 }
+let hasPlayedSuccessfully = false;
 function connectAndPlay(opts) {
   currentCastOpts = opts;
+  hasPlayedSuccessfully = false;
   return _connect(opts);
 }
 function detectStreamType(url) {
+  const lower = url.toLowerCase();
+  if (lower.includes(".m3u8") || lower.includes("type=m3u") || lower.includes("output=hls")) {
+    return Promise.resolve({ contentType: "application/x-mpegurl", streamType: "LIVE" });
+  }
+  if (lower.includes(".mp4") || lower.includes("output=mp4")) {
+    return Promise.resolve({ contentType: "video/mp4", streamType: "BUFFERED" });
+  }
+  if (lower.includes(".ts") || lower.includes("output=ts") || lower.includes("type=ts")) {
+    return Promise.resolve({ contentType: "video/mp2t", streamType: "LIVE" });
+  }
+  const fallback = { contentType: "video/mp2t", streamType: "LIVE" };
   return new Promise((resolve) => {
-    const fallback = { contentType: "video/mp2t", streamType: "LIVE" };
     try {
       const lib = url.startsWith("https") ? require("https") : require("http");
       const req = lib.request(url, {
@@ -323,16 +335,15 @@ function detectStreamType(url) {
         timeout: 4e3,
         rejectUnauthorized: false,
         headers: { Range: "bytes=0-512" }
-        // just grab the start
       }, (res) => {
         const ct = (res.headers["content-type"] || "").toLowerCase();
         res.destroy();
-        if (url.includes(".m3u") || url.includes(".m3u8") || ct.includes("mpegurl") || ct.includes("x-mpegurl")) {
+        if (ct.includes("mpegurl") || ct.includes("x-mpegurl")) {
           resolve({ contentType: "application/x-mpegurl", streamType: "LIVE" });
-        } else if (ct.includes("mp4") || url.includes(".mp4")) {
+        } else if (ct.includes("mp4")) {
           resolve({ contentType: "video/mp4", streamType: "BUFFERED" });
         } else {
-          resolve({ contentType: "video/mp2t", streamType: "LIVE" });
+          resolve(fallback);
         }
       });
       req.on("error", () => resolve(fallback));
@@ -428,6 +439,7 @@ function _connect({ host, port, url, title, aggressive }) {
             const ps = m.status[0].playerState;
             if (ps === "PLAYING" || ps === "BUFFERING" || ps === "PAUSED") {
               loadResolved = true;
+              hasPlayedSuccessfully = true;
               clearTimeout(timeout);
               resolve({ ok: true });
             } else if (ps === "IDLE" && m.status[0].idleReason === "ERROR") {
@@ -460,14 +472,22 @@ function _connect({ host, port, url, title, aggressive }) {
       activeClient = null;
       console.error("Cast client error:", e.message);
       castWindow?.webContents.send("cast-error", e.message);
-      _handleDisconnect();
-      reject(e);
+      if (hasPlayedSuccessfully) {
+        _handleDisconnect();
+      } else {
+        currentCastOpts = null;
+        reject(e);
+      }
     });
     client.on("close", () => {
       clearInterval(client._hbTimer);
       if (activeClient === client) activeClient = null;
       castWindow?.webContents.send("cast-disconnected");
-      _handleDisconnect();
+      if (hasPlayedSuccessfully) {
+        _handleDisconnect();
+      } else {
+        currentCastOpts = null;
+      }
     });
   });
 }
@@ -495,6 +515,7 @@ function sendMediaCmd(type, extra = {}) {
 }
 function stopCast() {
   currentCastOpts = null;
+  hasPlayedSuccessfully = false;
   clearReconnect();
   sendMediaCmd("STOP");
   try {
