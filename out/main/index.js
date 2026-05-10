@@ -313,8 +313,41 @@ function connectAndPlay(opts) {
   currentCastOpts = opts;
   return _connect(opts);
 }
+function detectStreamType(url) {
+  return new Promise((resolve) => {
+    const fallback = { contentType: "video/mp2t", streamType: "LIVE" };
+    try {
+      const lib = url.startsWith("https") ? require("https") : require("http");
+      const req = lib.request(url, {
+        method: "GET",
+        timeout: 4e3,
+        rejectUnauthorized: false,
+        headers: { Range: "bytes=0-512" }
+        // just grab the start
+      }, (res) => {
+        const ct = (res.headers["content-type"] || "").toLowerCase();
+        res.destroy();
+        if (url.includes(".m3u") || url.includes(".m3u8") || ct.includes("mpegurl") || ct.includes("x-mpegurl")) {
+          resolve({ contentType: "application/x-mpegurl", streamType: "LIVE" });
+        } else if (ct.includes("mp4") || url.includes(".mp4")) {
+          resolve({ contentType: "video/mp4", streamType: "BUFFERED" });
+        } else {
+          resolve({ contentType: "video/mp2t", streamType: "LIVE" });
+        }
+      });
+      req.on("error", () => resolve(fallback));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(fallback);
+      });
+      req.end();
+    } catch {
+      resolve(fallback);
+    }
+  });
+}
 function _connect({ host, port, url, title, aggressive }) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     if (activeClient) {
       clearReconnect();
       try {
@@ -323,6 +356,8 @@ function _connect({ host, port, url, title, aggressive }) {
       }
       activeClient = null;
     }
+    const { contentType, streamType } = await detectStreamType(url);
+    console.log("Cast stream type:", contentType, streamType, "for", url.slice(0, 80));
     const castv2 = require("castv2");
     const client = new castv2.Client();
     activeClient = client;
@@ -332,9 +367,8 @@ function _connect({ host, port, url, title, aggressive }) {
         client.close();
       } catch {
       }
-    }, 1e4);
+    }, 2e4);
     client.connect({ host, port: port || 8009 }, () => {
-      clearTimeout(timeout);
       const mkChan = (ns, dest = "receiver-0") => client.createChannel(CLIENT_ID, dest, ns, "JSON");
       const conn = mkChan(CONN_NS);
       const hb = mkChan(HB_NS);
@@ -348,55 +382,86 @@ function _connect({ host, port, url, title, aggressive }) {
       }, 5e3);
       client._hbTimer = hbTimer;
       let reqId = 1;
+      let appLaunched = false;
       recv.send({ type: "LAUNCH", appId: DEFAULT_APP_ID, requestId: reqId++ });
-      let resolved = false;
       recv.on("message", (data) => {
+        console.log("Receiver msg:", data.type, data.status?.applications?.[0]?.statusText);
         if (data.type === "LAUNCH_ERROR") {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            reject(new Error("Launch failed"));
-          }
+          clearTimeout(timeout);
+          reject(new Error("Chromecast app failed to launch"));
           return;
         }
         if (data.type !== "RECEIVER_STATUS") return;
         const appInfo = data.status?.applications?.[0];
-        if (!appInfo || appInfo.appId !== DEFAULT_APP_ID) return;
-        if (resolved) return;
-        resolved = true;
+        if (!appInfo || appInfo.appId !== DEFAULT_APP_ID || appLaunched) return;
+        appLaunched = true;
         const dest = appInfo.transportId || appInfo.sessionId;
+        console.log("App launched, transport:", dest);
         const mconn = mkChan(CONN_NS, dest);
         const media = mkChan(MEDIA_NS, dest);
         mconn.send({ type: "CONNECT" });
-        media.send({
-          type: "LOAD",
-          requestId: reqId++,
-          sessionId: appInfo.sessionId,
-          media: {
-            contentId: url,
-            contentType: "video/mp2t",
-            streamType: "LIVE",
-            metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
-          },
-          autoplay: true,
-          currentTime: 0
-        });
+        setTimeout(() => {
+          const loadReqId = reqId++;
+          console.log("Sending LOAD, contentType:", contentType, "url:", url.slice(0, 80));
+          media.send({
+            type: "LOAD",
+            requestId: loadReqId,
+            sessionId: appInfo.sessionId,
+            media: {
+              contentId: url,
+              contentType,
+              streamType,
+              metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
+            },
+            autoplay: true,
+            currentTime: 0
+          });
+        }, 500);
         client._media = media;
         client._recv = recv;
         client._reqId = reqId;
+        let loadResolved = false;
         media.on("message", (m) => {
+          console.log("Media msg:", m.type, m.status?.[0]?.playerState, m.status?.[0]?.idleReason);
           castWindow?.webContents.send("cast-media-status", m);
+          if (!loadResolved && m.type === "MEDIA_STATUS" && m.status?.[0]) {
+            const ps = m.status[0].playerState;
+            if (ps === "PLAYING" || ps === "BUFFERING" || ps === "PAUSED") {
+              loadResolved = true;
+              clearTimeout(timeout);
+              resolve({ ok: true });
+            } else if (ps === "IDLE" && m.status[0].idleReason === "ERROR") {
+              loadResolved = true;
+              clearTimeout(timeout);
+              const fallbackType = contentType === "video/mp2t" ? "application/x-mpegurl" : "video/mp2t";
+              console.log("Load error, retrying with contentType:", fallbackType);
+              media.send({
+                type: "LOAD",
+                requestId: reqId++,
+                sessionId: appInfo.sessionId,
+                media: {
+                  contentId: url,
+                  contentType: fallbackType,
+                  streamType: "LIVE",
+                  metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
+                },
+                autoplay: true,
+                currentTime: 0
+              });
+              loadResolved = false;
+            }
+          }
         });
-        resolve({ ok: true });
       });
     });
     client.on("error", (e) => {
       clearTimeout(timeout);
       clearInterval(client._hbTimer);
       activeClient = null;
+      console.error("Cast client error:", e.message);
       castWindow?.webContents.send("cast-error", e.message);
       _handleDisconnect();
-      if (!currentCastOpts) reject(e);
+      reject(e);
     });
     client.on("close", () => {
       clearInterval(client._hbTimer);
