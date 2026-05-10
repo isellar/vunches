@@ -337,6 +337,45 @@ function startStreamProxy(streamUrl, deviceHost) {
       resolve(null);
     }, 3e3);
     try {
+      let proxyFetch2 = function(url, res, redirectCount) {
+        if (redirectCount > 5) {
+          console.error("Proxy: too many redirects");
+          if (!res.headersSent) {
+            res.writeHead(502);
+            res.end();
+          }
+          return;
+        }
+        const lib = url.startsWith("https") ? https : http;
+        const upReq = lib.get(url, { rejectUnauthorized: false, timeout: 3e4 }, (upRes) => {
+          if (upRes.statusCode >= 300 && upRes.statusCode < 400 && upRes.headers.location) {
+            const location = upRes.headers.location;
+            console.log("Proxy: following redirect to", location.slice(0, 80));
+            upRes.destroy();
+            proxyFetch2(location, res, redirectCount + 1);
+            return;
+          }
+          console.log("Proxy: streaming from", url.slice(0, 80), "status", upRes.statusCode);
+          if (!res.headersSent) {
+            res.writeHead(200, {
+              "Content-Type": "video/mp2t",
+              "Access-Control-Allow-Origin": "*",
+              "Cache-Control": "no-cache",
+              "Transfer-Encoding": "chunked"
+            });
+          }
+          upRes.pipe(res);
+          res.on("close", () => upRes.destroy());
+        });
+        upReq.on("error", (e) => {
+          console.error("Proxy upstream error:", e.message);
+          if (!res.headersSent) {
+            res.writeHead(502);
+            res.end();
+          }
+        });
+      };
+      var proxyFetch = proxyFetch2;
       if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
         clearTimeout(giveUp);
         const lanIp = getLocalLanIp(deviceHost);
@@ -360,24 +399,7 @@ function startStreamProxy(streamUrl, deviceHost) {
           return;
         }
         console.log("Proxy: Chromecast fetching stream...");
-        const lib = streamUrl.startsWith("https") ? https : http;
-        const upstream = lib.get(streamUrl, { rejectUnauthorized: false, timeout: 3e4 }, (upRes) => {
-          res.writeHead(upRes.statusCode || 200, {
-            "Content-Type": "video/mp2t",
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache",
-            "Transfer-Encoding": "chunked"
-          });
-          upRes.pipe(res);
-          res.on("close", () => upRes.destroy());
-        });
-        upstream.on("error", (e) => {
-          console.error("Proxy upstream error:", e.message);
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end();
-          }
-        });
+        proxyFetch2(streamUrl, res, 0);
       });
       server.on("error", (e) => {
         clearTimeout(giveUp);
