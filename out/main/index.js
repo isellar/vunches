@@ -294,9 +294,36 @@ function stopDiscovery() {
     mdnsSocket = null;
   }
 }
+const FFMPEG_PATH = "C:\\Users\\ian\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin\\ffmpeg.exe";
 let proxyServer = null;
 let proxyPort = null;
-let proxyStreamUrl = null;
+let ffmpegProc = null;
+let hlsDir = null;
+function findFfmpeg() {
+  const candidates = [
+    FFMPEG_PATH,
+    "ffmpeg",
+    "C:\\ffmpeg\\bin\\ffmpeg.exe",
+    "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe"
+  ];
+  try {
+    const wingetBase = require("path").join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Packages");
+    const fs = require("fs");
+    if (fs.existsSync(wingetBase)) {
+      const pkgs = fs.readdirSync(wingetBase).filter((d) => d.startsWith("Gyan.FFmpeg"));
+      for (const pkg of pkgs) {
+        const bins = require("path").join(wingetBase, pkg);
+        const subs = fs.readdirSync(bins);
+        for (const sub of subs) {
+          const ffpath = require("path").join(bins, sub, "bin", "ffmpeg.exe");
+          if (fs.existsSync(ffpath)) candidates.unshift(ffpath);
+        }
+      }
+    }
+  } catch {
+  }
+  return candidates[0];
+}
 function getLocalLanIp(targetDeviceIp) {
   const nets = os.networkInterfaces();
   const candidates = [];
@@ -337,9 +364,7 @@ function resolveRedirects(url, maxRedirects = 5) {
       const lib = u.startsWith("https") ? require("https") : require("http");
       const req = lib.request(u, { method: "HEAD", timeout: 5e3, rejectUnauthorized: false }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const loc = res.headers.location;
-          console.log("Proxy pre-resolve redirect:", loc.slice(0, 80));
-          follow(loc, count + 1);
+          follow(res.headers.location, count + 1);
         } else {
           resolve(u);
         }
@@ -354,162 +379,148 @@ function resolveRedirects(url, maxRedirects = 5) {
     follow(url, 0);
   });
 }
-function startStreamProxy(streamUrl, deviceHost) {
-  return new Promise((resolve) => {
-    const giveUp = setTimeout(() => {
-      console.warn("Proxy: timed out starting, falling back to direct URL");
-      resolve(null);
-    }, 8e3);
-    try {
-      let proxyFetch2 = function(url, res, redirectCount) {
-        if (redirectCount > 5) {
-          console.error("Proxy: too many redirects");
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end();
-          }
-          return;
-        }
-        const lib = url.startsWith("https") ? https : http;
-        const upReq = lib.get(url, { rejectUnauthorized: false, timeout: 3e4 }, (upRes) => {
-          if (upRes.statusCode >= 300 && upRes.statusCode < 400 && upRes.headers.location) {
-            const location = upRes.headers.location;
-            console.log("Proxy: following redirect to", location.slice(0, 80));
-            upRes.destroy();
-            proxyFetch2(location, res, redirectCount + 1);
-            return;
-          }
-          console.log("Proxy: streaming from", url.slice(0, 80), "status", upRes.statusCode);
-          if (!res.headersSent) {
-            res.writeHead(200, {
-              "Content-Type": "video/mp2t",
-              "Access-Control-Allow-Origin": "*",
-              "Cache-Control": "no-cache",
-              "Transfer-Encoding": "chunked"
-            });
-          }
-          upRes.pipe(res);
-          res.on("close", () => upRes.destroy());
-        });
-        upReq.on("error", (e) => {
-          console.error("Proxy upstream error:", e.message);
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end();
-          }
-        });
-      };
-      var proxyFetch = proxyFetch2;
-      if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
-        clearTimeout(giveUp);
-        const lanIp = getLocalLanIp(deviceHost);
-        return resolve(lanIp ? `http://${lanIp}:${proxyPort}/stream` : null);
-      }
-      if (proxyServer) {
-        try {
-          proxyServer.close();
-        } catch {
-        }
-        proxyServer = null;
-        proxyPort = null;
-      }
-      proxyStreamUrl = streamUrl;
-      const http = require("http");
-      const https = require("https");
-      let resolvedUrl = null;
-      let pendingRequests = [];
-      resolveRedirects(streamUrl).then((u) => {
-        resolvedUrl = u;
-        console.log("Proxy pre-resolved to:", u.slice(0, 80));
-        pendingRequests.forEach(({ req, res }) => proxyFetch2(resolvedUrl, res, 0));
-        pendingRequests = [];
-      });
-      const server = http.createServer((req, res) => {
-        if (req.url !== "/stream") {
-          res.writeHead(404);
-          res.end();
-          return;
-        }
-        console.log("Proxy: Chromecast fetching stream...");
-        if (resolvedUrl) {
-          proxyFetch2(resolvedUrl, res, 0);
-        } else {
-          pendingRequests.push({ req, res });
-        }
-      });
-      server.on("error", (e) => {
-        clearTimeout(giveUp);
-        console.error("Proxy server error:", e.message);
-        resolve(null);
-      });
-      const tryPort = (port) => {
-        server.listen(port, "0.0.0.0", () => {
-          clearTimeout(giveUp);
-          proxyPort = server.address().port;
-          proxyServer = server;
-          const lanIp = getLocalLanIp(deviceHost);
-          console.log("Proxy listening on port", proxyPort, "| LAN IP:", lanIp, "| Device:", deviceHost);
-          if (!lanIp) {
-            console.warn("Proxy: no LAN IP found, falling back to direct");
-            server.close();
-            proxyServer = null;
-            proxyPort = null;
-            return resolve(null);
-          }
-          const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
-          console.log("Stream proxy ready:", proxyUrl);
-          if (resolvedUrl) {
-            resolve(proxyUrl);
-          } else {
-            const resolveWait = setInterval(() => {
-              if (resolvedUrl) {
-                clearInterval(resolveWait);
-                resolve(proxyUrl);
-              }
-            }, 100);
-            setTimeout(() => {
-              clearInterval(resolveWait);
-              resolve(proxyUrl);
-            }, 5e3);
-          }
-        });
-      };
-      server.once("error", (e) => {
-        if (e.code === "EADDRINUSE") {
-          console.log("Port 9234 in use, trying random port");
-          server.removeAllListeners("error");
-          server.on("error", (e2) => {
-            clearTimeout(giveUp);
-            console.error("Proxy server error:", e2.message);
-            resolve(null);
-          });
-          tryPort(0);
-        } else {
-          clearTimeout(giveUp);
-          console.error("Proxy server error:", e.message);
-          resolve(null);
-        }
-      });
-      tryPort(9234);
-    } catch (e) {
-      clearTimeout(giveUp);
-      console.error("Proxy setup error:", e.message);
-      resolve(null);
+async function startStreamProxy(streamUrl, deviceHost) {
+  const path = require("path");
+  const fs = require("fs");
+  const http = require("http");
+  const os2 = require("os");
+  stopStreamProxy();
+  const lanIp = getLocalLanIp(deviceHost);
+  if (!lanIp) {
+    console.warn("HLS proxy: no LAN IP");
+    return null;
+  }
+  const ffmpeg = findFfmpeg();
+  if (!ffmpeg || !fs.existsSync(ffmpeg)) {
+    console.warn("ffmpeg not found at", ffmpeg);
+    return null;
+  }
+  hlsDir = path.join(os2.tmpdir(), "vunches-hls-" + Date.now());
+  fs.mkdirSync(hlsDir, { recursive: true });
+  const m3u8Path = path.join(hlsDir, "stream.m3u8");
+  console.log("HLS proxy: starting ffmpeg transcoder...");
+  console.log("HLS dir:", hlsDir);
+  const finalUrl = await resolveRedirects(streamUrl);
+  console.log("HLS proxy: final stream URL:", finalUrl.slice(0, 80));
+  ffmpegProc = spawn(ffmpeg, [
+    "-loglevel",
+    "warning",
+    "-tls_verify",
+    "0",
+    // skip TLS cert check
+    "-i",
+    finalUrl,
+    // input: resolved stream URL
+    "-c",
+    "copy",
+    // copy codec — no re-encode, very fast
+    "-f",
+    "hls",
+    "-hls_time",
+    "2",
+    // 2-second segments
+    "-hls_list_size",
+    "6",
+    // keep 6 segments in playlist
+    "-hls_flags",
+    "delete_segments+append_list",
+    "-hls_segment_filename",
+    path.join(hlsDir, "seg%03d.ts"),
+    m3u8Path
+  ], { detached: false, stdio: ["ignore", "pipe", "pipe"] });
+  ffmpegProc.stdout.on("data", (d) => process.stdout.write(d));
+  ffmpegProc.stderr.on("data", (d) => {
+    const msg = d.toString();
+    if (msg.includes("Error") || msg.includes("error") || msg.includes("failed")) {
+      console.error("ffmpeg:", msg.trim());
     }
   });
+  ffmpegProc.on("close", (code) => {
+    console.log("ffmpeg exited with code", code);
+    ffmpegProc = null;
+  });
+  await new Promise((resolve, reject) => {
+    const start = Date.now();
+    const check = setInterval(() => {
+      if (fs.existsSync(m3u8Path)) {
+        clearInterval(check);
+        console.log("HLS playlist ready:", m3u8Path);
+        resolve();
+      } else if (Date.now() - start > 1e4) {
+        clearInterval(check);
+        reject(new Error("ffmpeg did not produce HLS playlist in time"));
+      }
+    }, 200);
+  }).catch((e) => {
+    console.error("HLS proxy setup failed:", e.message);
+    stopStreamProxy();
+    return null;
+  });
+  const server = http.createServer((req, res) => {
+    const reqPath = req.url.split("?")[0];
+    let filePath;
+    if (reqPath === "/" || reqPath === "/stream.m3u8") {
+      filePath = m3u8Path;
+    } else if (reqPath.endsWith(".ts")) {
+      filePath = path.join(hlsDir, path.basename(reqPath));
+    } else {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const ct = filePath.endsWith(".m3u8") ? "application/x-mpegurl" : "video/mp2t";
+      res.writeHead(200, {
+        "Content-Type": ct,
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-cache"
+      });
+      res.end(data);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(9234, "0.0.0.0", resolve);
+  }).catch(async () => {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "0.0.0.0", resolve);
+    });
+  });
+  proxyPort = server.address().port;
+  proxyServer = server;
+  const proxyUrl = `http://${lanIp}:${proxyPort}/stream.m3u8`;
+  console.log("HLS proxy ready:", proxyUrl);
+  return proxyUrl;
 }
 function stopStreamProxy() {
+  if (ffmpegProc) {
+    try {
+      ffmpegProc.kill("SIGTERM");
+    } catch {
+    }
+    ffmpegProc = null;
+  }
   if (proxyServer) {
     try {
       proxyServer.close();
     } catch {
     }
-    const { exec } = require("child_process");
-    exec('netsh advfirewall firewall delete rule name="Vunches Stream Proxy"', () => {
-    });
     proxyServer = null;
     proxyPort = null;
-    proxyStreamUrl = null;
+  }
+  if (hlsDir) {
+    try {
+      const fs = require("fs");
+      fs.rmSync(hlsDir, { recursive: true, force: true });
+    } catch {
+    }
+    hlsDir = null;
   }
 }
 function ensureFirewallRule() {
@@ -661,7 +672,7 @@ function _connect({ host, port, url, title, aggressive }) {
             sessionId: appInfo.sessionId,
             media: {
               contentId: castUrl,
-              contentType: "video/mp2t",
+              contentType: castUrl.includes(".m3u8") ? "application/x-mpegurl" : "video/mp2t",
               streamType: "LIVE",
               metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
             },
