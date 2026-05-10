@@ -262,6 +262,98 @@ function stopDiscovery() {
   }
 }
 
+// ─── Stream Proxy (for Chromecast — serves stream from local machine) ─────────
+// The Chromecast fetches streams directly from the TV's network.
+// IPTV streams with self-signed certs or auth in the URL may not work.
+// We proxy through http://LAN_IP:PORT so the TV can reach it without TLS issues.
+
+let proxyServer = null
+let proxyPort = null
+let proxyStreamUrl = null
+
+function getLocalLanIp() {
+  const nets = os.networkInterfaces()
+  for (const ifaces of Object.values(nets)) {
+    for (const iface of ifaces) {
+      if (iface.family === 'IPv4' && iface.address.startsWith('192.168.')) {
+        return iface.address
+      }
+    }
+  }
+  return null
+}
+
+function startStreamProxy(streamUrl) {
+  return new Promise((resolve, reject) => {
+    // If already proxying the same URL, reuse
+    if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
+      const lanIp = getLocalLanIp()
+      return resolve(lanIp ? `http://${lanIp}:${proxyPort}/stream` : null)
+    }
+
+    // Stop existing proxy
+    if (proxyServer) {
+      try { proxyServer.close() } catch {}
+      proxyServer = null
+      proxyPort = null
+    }
+
+    proxyStreamUrl = streamUrl
+    const http  = require('http')
+    const https = require('https')
+
+    const server = http.createServer((req, res) => {
+      if (req.url !== '/stream') { res.writeHead(404); res.end(); return }
+
+      console.log('Proxy: Chromecast fetching stream from', streamUrl.slice(0, 80))
+      const lib = streamUrl.startsWith('https') ? https : http
+      const upstream = lib.get(streamUrl, { rejectUnauthorized: false, timeout: 15000 }, (upstream) => {
+        // Pass through content-type and status
+        const ct = upstream.headers['content-type'] || 'video/mp2t'
+        res.writeHead(upstream.statusCode || 200, {
+          'Content-Type': ct,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache',
+          'Transfer-Encoding': 'chunked',
+        })
+        upstream.pipe(res)
+        res.on('close', () => upstream.destroy())
+      })
+      upstream.on('error', (e) => {
+        console.error('Proxy upstream error:', e.message)
+        res.writeHead(502); res.end()
+      })
+    })
+
+    server.listen(0, '0.0.0.0', () => {
+      proxyPort = server.address().port
+      proxyServer = server
+      const lanIp = getLocalLanIp()
+      if (!lanIp) {
+        server.close()
+        return resolve(null) // can't determine LAN IP, skip proxy
+      }
+      const proxyUrl = `http://${lanIp}:${proxyPort}/stream`
+      console.log('Stream proxy started:', proxyUrl, '→', streamUrl.slice(0, 80))
+      resolve(proxyUrl)
+    })
+
+    server.on('error', (e) => {
+      console.error('Proxy server error:', e.message)
+      resolve(null) // fall back to direct URL
+    })
+  })
+}
+
+function stopStreamProxy() {
+  if (proxyServer) {
+    try { proxyServer.close() } catch {}
+    proxyServer = null
+    proxyPort = null
+    proxyStreamUrl = null
+  }
+}
+
 // ─── Chromecast Client ────────────────────────────────────────────────────────
 
 const CLIENT_ID = 'sender-0'
@@ -341,9 +433,15 @@ function _connect({ host, port, url, title, aggressive }) {
       activeClient = null
     }
 
+    // Start local proxy — Chromecast fetches from our machine instead of the IPTV server directly
+    // This bypasses TLS cert issues and auth-in-URL problems
+    const proxyUrl = await startStreamProxy(url)
+    const castUrl = proxyUrl || url  // fall back to direct if proxy fails
+    console.log('Cast URL:', proxyUrl ? `proxy → ${proxyUrl}` : `direct → ${url.slice(0, 80)}`)
+
     // Detect stream type before connecting so the Chromecast knows what to expect
     const { contentType, streamType } = await detectStreamType(url)
-    console.log('Cast stream type:', contentType, streamType, 'for', url.slice(0, 80))
+    console.log('Cast stream type:', contentType, streamType)
 
     const castv2 = require('castv2')
     const client = new castv2.Client()
@@ -396,15 +494,15 @@ function _connect({ host, port, url, title, aggressive }) {
         // Small delay to let the media session establish before sending LOAD
         setTimeout(() => {
           const loadReqId = reqId++
-          console.log('Sending LOAD, contentType:', contentType, 'url:', url.slice(0, 80))
+          console.log('Sending LOAD, contentType:', contentType, 'url:', castUrl.slice(0, 80))
           media.send({
             type: 'LOAD',
             requestId: loadReqId,
             sessionId: appInfo.sessionId,
             media: {
-              contentId: url,
-              contentType,
-              streamType,
+              contentId: castUrl,
+              contentType: 'video/mp2t', // proxy always serves raw TS
+              streamType: 'LIVE',
               metadata: { type: 0, metadataType: 0, title: title || 'Vunches' },
             },
             autoplay: true,
@@ -418,8 +516,16 @@ function _connect({ host, port, url, title, aggressive }) {
 
         let loadResolved = false
         media.on('message', (m) => {
-          console.log('Media msg:', m.type, m.status?.[0]?.playerState, m.status?.[0]?.idleReason)
+          console.log('Media msg:', m.type, m.status?.[0]?.playerState, m.status?.[0]?.idleReason, m.detailedErrorCode || '')
           castWindow?.webContents.send('cast-media-status', m)
+
+          if (!loadResolved && m.type === 'LOAD_FAILED') {
+            loadResolved = true
+            clearTimeout(timeout)
+            currentCastOpts = null
+            reject(new Error('Stream could not be loaded by the Chromecast. The TV may not be able to reach this URL directly.'))
+            return
+          }
 
           // Resolve once media confirms it's loading or playing
           if (!loadResolved && m.type === 'MEDIA_STATUS' && m.status?.[0]) {
@@ -432,26 +538,8 @@ function _connect({ host, port, url, title, aggressive }) {
             } else if (ps === 'IDLE' && m.status[0].idleReason === 'ERROR') {
               loadResolved = true
               clearTimeout(timeout)
-              // Try fallback content type
-              const fallbackType = contentType === 'video/mp2t'
-                ? 'application/x-mpegurl'
-                : 'video/mp2t'
-              console.log('Load error, retrying with contentType:', fallbackType)
-              media.send({
-                type: 'LOAD',
-                requestId: reqId++,
-                sessionId: appInfo.sessionId,
-                media: {
-                  contentId: url,
-                  contentType: fallbackType,
-                  streamType: 'LIVE',
-                  metadata: { type: 0, metadataType: 0, title: title || 'Vunches' },
-                },
-                autoplay: true,
-                currentTime: 0,
-              })
-              // Give the retry a chance before giving up
-              loadResolved = false
+              currentCastOpts = null
+              reject(new Error('Stream failed to load on the Chromecast. The TV may not be able to reach this stream URL directly.'))
             }
           }
         })
@@ -518,6 +606,7 @@ function stopCast() {
   currentCastOpts = null
   hasPlayedSuccessfully = false
   clearReconnect()
+  stopStreamProxy()
   sendMediaCmd('STOP')
   try { clearInterval(activeClient?._hbTimer); activeClient?.close() } catch {}
   activeClient = null
@@ -569,6 +658,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   stopDiscovery()
   stopCast()
+  stopStreamProxy()
   if (process.platform !== 'darwin') app.quit()
 })
 

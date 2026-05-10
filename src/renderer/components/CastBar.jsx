@@ -9,7 +9,7 @@ export default function CastBar() {
   } = useStore()
 
   const isCasting = selectedDevice &&
-    ['playing', 'paused', 'reconnecting', 'connecting'].includes(castStatus)
+    ['playing', 'paused', 'reconnecting', 'connecting', 'error'].includes(castStatus)
   const hasDevices = castDevices.length > 0
 
   async function handleStop() {
@@ -111,40 +111,58 @@ export default function CastBar() {
         </div>
       )}
 
-      {/* Bottom bar — device selector + reconnect toggle */}
-      <div className="flex items-center gap-4 px-5 h-12">
+      {/* Bottom bar — device selector OR disconnect + reconnect toggle */}
+      <div className="flex items-center gap-3 px-5 h-12">
 
         {/* Cast icon */}
         <CastIcon active={isCasting} />
 
-        {/* Device selector */}
-        <div className="flex items-center gap-2.5 flex-shrink-0">
-          {!hasDevices ? (
-            <span className="flex items-center gap-2 text-xs text-gray-600">
-              <div className="w-3 h-3 border border-gray-600 border-t-transparent rounded-full animate-spin" />
-              Scanning for cast devices...
+        {/* While actively casting: show device name + Disconnect button */}
+        {isCasting ? (
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <span className="text-sm text-gray-300">
+              {selectedDevice?.name}
             </span>
-          ) : (
-            <select
-              value={selectedDevice?.host || ''}
-              onChange={(e) => {
-                const device = castDevices.find(d => d.host === e.target.value) || null
-                selectDevice(device)
-                if (isCasting) window.electron.cast.stop()
-              }}
-              className="bg-[#1c1c1c] border border-white/10 text-gray-200 text-sm rounded-lg
-                         px-3 py-1.5 outline-none focus:border-purple-500/50 cursor-pointer
-                         min-w-[160px] max-w-[220px]"
+            <button
+              onClick={handleStop}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm
+                         text-red-400 border border-red-900/50 hover:bg-red-900/20 transition-colors"
             >
-              <option value="">Select cast device...</option>
-              {castDevices.map(d => (
-                <option key={d.host} value={d.host}>{d.name}</option>
-              ))}
-            </select>
-          )}
-        </div>
+              <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 6h12v12H6z"/>
+              </svg>
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          /* Device selector — only shown when not casting */
+          <div className="flex items-center gap-2.5 flex-shrink-0">
+            {!hasDevices ? (
+              <span className="flex items-center gap-2 text-xs text-gray-600">
+                <div className="w-3 h-3 border border-gray-600 border-t-transparent rounded-full animate-spin" />
+                Scanning for cast devices...
+              </span>
+            ) : (
+              <select
+                value={selectedDevice?.host || ''}
+                onChange={(e) => {
+                  const device = castDevices.find(d => d.host === e.target.value) || null
+                  selectDevice(device)
+                }}
+                className="bg-[#1c1c1c] border border-white/10 text-gray-200 text-sm rounded-lg
+                           px-3 py-1.5 outline-none focus:border-purple-500/50 cursor-pointer
+                           min-w-[160px] max-w-[220px]"
+              >
+                <option value="">Select cast device...</option>
+                {castDevices.map(d => (
+                  <option key={d.host} value={d.host}>{d.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
 
-        {/* Ready hint */}
+        {/* Ready hint — only when device selected but not casting */}
         {selectedDevice && castStatus === 'idle' && (
           <span className="text-xs text-gray-600">
             Click a channel to cast to <span className="text-gray-400">{selectedDevice.name}</span>

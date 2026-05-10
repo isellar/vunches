@@ -294,6 +294,91 @@ function stopDiscovery() {
     mdnsSocket = null;
   }
 }
+let proxyServer = null;
+let proxyPort = null;
+let proxyStreamUrl = null;
+function getLocalLanIp() {
+  const nets = os.networkInterfaces();
+  for (const ifaces of Object.values(nets)) {
+    for (const iface of ifaces) {
+      if (iface.family === "IPv4" && iface.address.startsWith("192.168.")) {
+        return iface.address;
+      }
+    }
+  }
+  return null;
+}
+function startStreamProxy(streamUrl) {
+  return new Promise((resolve, reject) => {
+    if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
+      const lanIp = getLocalLanIp();
+      return resolve(lanIp ? `http://${lanIp}:${proxyPort}/stream` : null);
+    }
+    if (proxyServer) {
+      try {
+        proxyServer.close();
+      } catch {
+      }
+      proxyServer = null;
+      proxyPort = null;
+    }
+    proxyStreamUrl = streamUrl;
+    const http = require("http");
+    const https = require("https");
+    const server = http.createServer((req, res) => {
+      if (req.url !== "/stream") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      console.log("Proxy: Chromecast fetching stream from", streamUrl.slice(0, 80));
+      const lib = streamUrl.startsWith("https") ? https : http;
+      const upstream = lib.get(streamUrl, { rejectUnauthorized: false, timeout: 15e3 }, (upstream2) => {
+        const ct = upstream2.headers["content-type"] || "video/mp2t";
+        res.writeHead(upstream2.statusCode || 200, {
+          "Content-Type": ct,
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-cache",
+          "Transfer-Encoding": "chunked"
+        });
+        upstream2.pipe(res);
+        res.on("close", () => upstream2.destroy());
+      });
+      upstream.on("error", (e) => {
+        console.error("Proxy upstream error:", e.message);
+        res.writeHead(502);
+        res.end();
+      });
+    });
+    server.listen(0, "0.0.0.0", () => {
+      proxyPort = server.address().port;
+      proxyServer = server;
+      const lanIp = getLocalLanIp();
+      if (!lanIp) {
+        server.close();
+        return resolve(null);
+      }
+      const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
+      console.log("Stream proxy started:", proxyUrl, "→", streamUrl.slice(0, 80));
+      resolve(proxyUrl);
+    });
+    server.on("error", (e) => {
+      console.error("Proxy server error:", e.message);
+      resolve(null);
+    });
+  });
+}
+function stopStreamProxy() {
+  if (proxyServer) {
+    try {
+      proxyServer.close();
+    } catch {
+    }
+    proxyServer = null;
+    proxyPort = null;
+    proxyStreamUrl = null;
+  }
+}
 const CLIENT_ID = "sender-0";
 const DEFAULT_APP_ID = "CC1AD845";
 const MEDIA_NS = "urn:x-cast:com.google.cast.media";
@@ -367,8 +452,11 @@ function _connect({ host, port, url, title, aggressive }) {
       }
       activeClient = null;
     }
+    const proxyUrl = await startStreamProxy(url);
+    const castUrl = proxyUrl || url;
+    console.log("Cast URL:", proxyUrl ? `proxy → ${proxyUrl}` : `direct → ${url.slice(0, 80)}`);
     const { contentType, streamType } = await detectStreamType(url);
-    console.log("Cast stream type:", contentType, streamType, "for", url.slice(0, 80));
+    console.log("Cast stream type:", contentType, streamType);
     const castv2 = require("castv2");
     const client = new castv2.Client();
     activeClient = client;
@@ -413,15 +501,16 @@ function _connect({ host, port, url, title, aggressive }) {
         mconn.send({ type: "CONNECT" });
         setTimeout(() => {
           const loadReqId = reqId++;
-          console.log("Sending LOAD, contentType:", contentType, "url:", url.slice(0, 80));
+          console.log("Sending LOAD, contentType:", contentType, "url:", castUrl.slice(0, 80));
           media.send({
             type: "LOAD",
             requestId: loadReqId,
             sessionId: appInfo.sessionId,
             media: {
-              contentId: url,
-              contentType,
-              streamType,
+              contentId: castUrl,
+              contentType: "video/mp2t",
+              // proxy always serves raw TS
+              streamType: "LIVE",
               metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
             },
             autoplay: true,
@@ -433,8 +522,15 @@ function _connect({ host, port, url, title, aggressive }) {
         client._reqId = reqId;
         let loadResolved = false;
         media.on("message", (m) => {
-          console.log("Media msg:", m.type, m.status?.[0]?.playerState, m.status?.[0]?.idleReason);
+          console.log("Media msg:", m.type, m.status?.[0]?.playerState, m.status?.[0]?.idleReason, m.detailedErrorCode || "");
           castWindow?.webContents.send("cast-media-status", m);
+          if (!loadResolved && m.type === "LOAD_FAILED") {
+            loadResolved = true;
+            clearTimeout(timeout);
+            currentCastOpts = null;
+            reject(new Error("Stream could not be loaded by the Chromecast. The TV may not be able to reach this URL directly."));
+            return;
+          }
           if (!loadResolved && m.type === "MEDIA_STATUS" && m.status?.[0]) {
             const ps = m.status[0].playerState;
             if (ps === "PLAYING" || ps === "BUFFERING" || ps === "PAUSED") {
@@ -445,22 +541,8 @@ function _connect({ host, port, url, title, aggressive }) {
             } else if (ps === "IDLE" && m.status[0].idleReason === "ERROR") {
               loadResolved = true;
               clearTimeout(timeout);
-              const fallbackType = contentType === "video/mp2t" ? "application/x-mpegurl" : "video/mp2t";
-              console.log("Load error, retrying with contentType:", fallbackType);
-              media.send({
-                type: "LOAD",
-                requestId: reqId++,
-                sessionId: appInfo.sessionId,
-                media: {
-                  contentId: url,
-                  contentType: fallbackType,
-                  streamType: "LIVE",
-                  metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
-                },
-                autoplay: true,
-                currentTime: 0
-              });
-              loadResolved = false;
+              currentCastOpts = null;
+              reject(new Error("Stream failed to load on the Chromecast. The TV may not be able to reach this stream URL directly."));
             }
           }
         });
@@ -517,6 +599,7 @@ function stopCast() {
   currentCastOpts = null;
   hasPlayedSuccessfully = false;
   clearReconnect();
+  stopStreamProxy();
   sendMediaCmd("STOP");
   try {
     clearInterval(activeClient?._hbTimer);
@@ -565,6 +648,7 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => {
   stopDiscovery();
   stopCast();
+  stopStreamProxy();
   if (process.platform !== "darwin") app.quit();
 });
 ipcMain.handle("store-get", async (_e, k) => {
