@@ -329,9 +329,16 @@ function startStreamProxy(streamUrl) {
       proxyPort = server.address().port
       proxyServer = server
       const lanIp = getLocalLanIp()
+      console.log('Proxy server listening on port', proxyPort, '| LAN IP:', lanIp)
+      // Open Windows Firewall for this port so Chromecast can reach us
+      const { exec } = require('child_process')
+      exec(`netsh advfirewall firewall add rule name="Vunches Stream Proxy" dir=in action=allow protocol=TCP localport=${proxyPort}`,
+        (err) => { if (err) console.warn('Firewall rule add failed (may need admin):', err.message) }
+      )
       if (!lanIp) {
+        console.warn('Proxy: could not determine LAN IP — falling back to direct URL')
         server.close()
-        return resolve(null) // can't determine LAN IP, skip proxy
+        return resolve(null)
       }
       const proxyUrl = `http://${lanIp}:${proxyPort}/stream`
       console.log('Stream proxy started:', proxyUrl, '→', streamUrl.slice(0, 80))
@@ -340,7 +347,7 @@ function startStreamProxy(streamUrl) {
 
     server.on('error', (e) => {
       console.error('Proxy server error:', e.message)
-      resolve(null) // fall back to direct URL
+      resolve(null)
     })
   })
 }
@@ -348,6 +355,8 @@ function startStreamProxy(streamUrl) {
 function stopStreamProxy() {
   if (proxyServer) {
     try { proxyServer.close() } catch {}
+    const { exec } = require('child_process')
+    exec('netsh advfirewall firewall delete rule name="Vunches Stream Proxy"', () => {})
     proxyServer = null
     proxyPort = null
     proxyStreamUrl = null
@@ -374,6 +383,12 @@ function clearReconnect() {
 let hasPlayedSuccessfully = false  // only retry if we actually played once
 
 function connectAndPlay(opts) {
+  // Kill any existing castv2 client cleanly
+  clearReconnect()
+  if (activeClient) {
+    try { activeClient.close() } catch {}
+    activeClient = null
+  }
   currentCastOpts = opts
   hasPlayedSuccessfully = false
   return _connect(opts)
