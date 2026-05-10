@@ -312,13 +312,36 @@ function getLocalLanIp(targetDeviceIp) {
   return candidates[0] || null
 }
 
+// Resolve the final URL after following all redirects (pre-warm)
+function resolveRedirects(url, maxRedirects = 5) {
+  return new Promise((resolve) => {
+    function follow(u, count) {
+      if (count > maxRedirects) return resolve(u)
+      const lib = u.startsWith('https') ? require('https') : require('http')
+      const req = lib.request(u, { method: 'HEAD', timeout: 5000, rejectUnauthorized: false }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const loc = res.headers.location
+          console.log('Proxy pre-resolve redirect:', loc.slice(0, 80))
+          follow(loc, count + 1)
+        } else {
+          resolve(u)
+        }
+      })
+      req.on('error', () => resolve(u))
+      req.on('timeout', () => { req.destroy(); resolve(u) })
+      req.end()
+    }
+    follow(url, 0)
+  })
+}
+
 function startStreamProxy(streamUrl, deviceHost) {
   return new Promise((resolve) => {
     // Safety timeout — never hang the cast flow
     const giveUp = setTimeout(() => {
       console.warn('Proxy: timed out starting, falling back to direct URL')
       resolve(null)
-    }, 3000)
+    }, 8000)
 
     try {
       // Reuse existing proxy for same stream
@@ -339,10 +362,27 @@ function startStreamProxy(streamUrl, deviceHost) {
       const http  = require('http')
       const https = require('https')
 
+      // Pre-resolve redirects — queue requests until resolved
+      let resolvedUrl = null
+      let pendingRequests = []
+
+      resolveRedirects(streamUrl).then(u => {
+        resolvedUrl = u
+        console.log('Proxy pre-resolved to:', u.slice(0, 80))
+        // Serve any requests that came in while we were resolving
+        pendingRequests.forEach(({ req, res }) => proxyFetch(resolvedUrl, res, 0))
+        pendingRequests = []
+      })
+
       const server = http.createServer((req, res) => {
         if (req.url !== '/stream') { res.writeHead(404); res.end(); return }
         console.log('Proxy: Chromecast fetching stream...')
-        proxyFetch(streamUrl, res, 0)
+        if (resolvedUrl) {
+          proxyFetch(resolvedUrl, res, 0)
+        } else {
+          // Still resolving — queue it
+          pendingRequests.push({ req, res })
+        }
       })
 
       function proxyFetch(url, res, redirectCount) {
@@ -403,7 +443,17 @@ function startStreamProxy(streamUrl, deviceHost) {
 
           const proxyUrl = `http://${lanIp}:${proxyPort}/stream`
           console.log('Stream proxy ready:', proxyUrl)
-          resolve(proxyUrl)
+          // Wait for redirect resolution before returning — ensures Chromecast
+          // gets data immediately without any redirect delay on first request
+          if (resolvedUrl) {
+            resolve(proxyUrl)
+          } else {
+            // Wait up to 5s for redirect resolution, then proceed anyway
+            const resolveWait = setInterval(() => {
+              if (resolvedUrl) { clearInterval(resolveWait); resolve(proxyUrl) }
+            }, 100)
+            setTimeout(() => { clearInterval(resolveWait); resolve(proxyUrl) }, 5000)
+          }
         })
       }
 
@@ -610,14 +660,17 @@ function _connect({ host, port, url, title, aggressive }) {
             sessionId: appInfo.sessionId,
             media: {
               contentId: castUrl,
-              contentType: 'video/mp2t', // proxy always serves raw TS
+              contentType: 'video/mp2t',
               streamType: 'LIVE',
               metadata: { type: 0, metadataType: 0, title: title || 'Vunches' },
             },
             autoplay: true,
             currentTime: 0,
+            // Give the Chromecast more time to buffer before declaring failure
+            activeTrackIds: [],
+            repeatMode: 'REPEAT_OFF',
           })
-        }, 500)
+        }, 1000) // 1s delay — wait for proxy to have data flowing before Chromecast connects
 
         client._media = media
         client._recv  = recv

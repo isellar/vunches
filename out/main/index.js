@@ -330,12 +330,36 @@ function getLocalLanIp(targetDeviceIp) {
   });
   return candidates[0] || null;
 }
+function resolveRedirects(url, maxRedirects = 5) {
+  return new Promise((resolve) => {
+    function follow(u, count) {
+      if (count > maxRedirects) return resolve(u);
+      const lib = u.startsWith("https") ? require("https") : require("http");
+      const req = lib.request(u, { method: "HEAD", timeout: 5e3, rejectUnauthorized: false }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const loc = res.headers.location;
+          console.log("Proxy pre-resolve redirect:", loc.slice(0, 80));
+          follow(loc, count + 1);
+        } else {
+          resolve(u);
+        }
+      });
+      req.on("error", () => resolve(u));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(u);
+      });
+      req.end();
+    }
+    follow(url, 0);
+  });
+}
 function startStreamProxy(streamUrl, deviceHost) {
   return new Promise((resolve) => {
     const giveUp = setTimeout(() => {
       console.warn("Proxy: timed out starting, falling back to direct URL");
       resolve(null);
-    }, 3e3);
+    }, 8e3);
     try {
       let proxyFetch2 = function(url, res, redirectCount) {
         if (redirectCount > 5) {
@@ -392,6 +416,14 @@ function startStreamProxy(streamUrl, deviceHost) {
       proxyStreamUrl = streamUrl;
       const http = require("http");
       const https = require("https");
+      let resolvedUrl = null;
+      let pendingRequests = [];
+      resolveRedirects(streamUrl).then((u) => {
+        resolvedUrl = u;
+        console.log("Proxy pre-resolved to:", u.slice(0, 80));
+        pendingRequests.forEach(({ req, res }) => proxyFetch2(resolvedUrl, res, 0));
+        pendingRequests = [];
+      });
       const server = http.createServer((req, res) => {
         if (req.url !== "/stream") {
           res.writeHead(404);
@@ -399,7 +431,11 @@ function startStreamProxy(streamUrl, deviceHost) {
           return;
         }
         console.log("Proxy: Chromecast fetching stream...");
-        proxyFetch2(streamUrl, res, 0);
+        if (resolvedUrl) {
+          proxyFetch2(resolvedUrl, res, 0);
+        } else {
+          pendingRequests.push({ req, res });
+        }
       });
       server.on("error", (e) => {
         clearTimeout(giveUp);
@@ -422,7 +458,20 @@ function startStreamProxy(streamUrl, deviceHost) {
           }
           const proxyUrl = `http://${lanIp}:${proxyPort}/stream`;
           console.log("Stream proxy ready:", proxyUrl);
-          resolve(proxyUrl);
+          if (resolvedUrl) {
+            resolve(proxyUrl);
+          } else {
+            const resolveWait = setInterval(() => {
+              if (resolvedUrl) {
+                clearInterval(resolveWait);
+                resolve(proxyUrl);
+              }
+            }, 100);
+            setTimeout(() => {
+              clearInterval(resolveWait);
+              resolve(proxyUrl);
+            }, 5e3);
+          }
         });
       };
       server.once("error", (e) => {
@@ -613,14 +662,16 @@ function _connect({ host, port, url, title, aggressive }) {
             media: {
               contentId: castUrl,
               contentType: "video/mp2t",
-              // proxy always serves raw TS
               streamType: "LIVE",
               metadata: { type: 0, metadataType: 0, title: title || "Vunches" }
             },
             autoplay: true,
-            currentTime: 0
+            currentTime: 0,
+            // Give the Chromecast more time to buffer before declaring failure
+            activeTrackIds: [],
+            repeatMode: "REPEAT_OFF"
           });
-        }, 500);
+        }, 1e3);
         client._media = media;
         client._recv = recv;
         client._reqId = reqId;
