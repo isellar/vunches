@@ -137,28 +137,42 @@ function _localIPs() {
   }
   return _cachedLocalIPs;
 }
-function parseFriendlyName(msg) {
-  const str = msg.toString("binary");
-  const fnMatch = str.match(/fn=([^\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f]+)/);
-  if (fnMatch) return fnMatch[1].replace(/[^\x20-\x7e]/g, "").trim();
-  const readable = [];
-  let i = 12;
-  while (i < str.length) {
-    const len = str.charCodeAt(i);
-    if (len === 0 || len > 63) break;
-    const label = str.slice(i + 1, i + 1 + len).replace(/[^\x20-\x7e]/g, "");
-    if (label && !label.startsWith("_")) readable.push(label);
-    i += 1 + len;
+function parseDnsTxtRecords(msg) {
+  const result = {};
+  const known = ["fn=", "id=", "md=", "rs=", "ve=", "ca=", "st=", "bs=", "nf="];
+  for (let i = 0; i < msg.length - 3; i++) {
+    for (const key of known) {
+      if (i + key.length > msg.length) continue;
+      const chunk = msg.slice(i, i + key.length).toString("utf8");
+      if (chunk === key) {
+        let end = i + key.length;
+        while (end < msg.length && msg[end] !== 0 && (msg[end] >= 32 || msg[end] === 9)) {
+          end++;
+        }
+        const val = msg.slice(i + key.length, end).toString("utf8").trim();
+        if (val) result[key.slice(0, -1)] = val;
+        break;
+      }
+    }
   }
-  return readable[0] || null;
+  return result;
 }
 function startDiscovery(win) {
   castWindow = win;
   discoveredDevices = [];
   if (mdnsSocket) {
-    try {
-      mdnsSocket.close();
-    } catch {
+    if (Array.isArray(mdnsSocket)) {
+      mdnsSocket.forEach((s) => {
+        try {
+          s.close();
+        } catch {
+        }
+      });
+    } else {
+      try {
+        mdnsSocket.close();
+      } catch {
+      }
     }
     mdnsSocket = null;
   }
@@ -166,37 +180,103 @@ function startDiscovery(win) {
     clearInterval(discoveryInterval);
     discoveryInterval = null;
   }
-  const interfaces = getLocalInterfaces();
-  if (!interfaces.length) return;
-  interfaces.some((ip) => ip.startsWith("192.168.") || ip.startsWith("10.0."));
-  const bindAddr = interfaces.find((ip) => ip.startsWith("192.168.")) || interfaces.find((ip) => ip.startsWith("10.0.")) || interfaces[0];
-  const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
-  mdnsSocket = sock;
-  sock.on("error", (e) => console.error("mDNS socket error:", e.message));
-  sock.on("message", (msg, rinfo) => {
+  const localIPs = _localIPs();
+  const bindAddrs = getLocalInterfaces().filter(
+    (ip) => !ip.startsWith("127.") && !ip.startsWith("172.") && // WSL2/Docker/Hyper-V virtual switches
+    !ip.startsWith("10.5.")
+    // NordVPN / other VPN ranges
+  );
+  if (!bindAddrs.length) {
+    bindAddrs.push(...getLocalInterfaces().filter((ip) => !ip.startsWith("127.")));
+  }
+  console.log("mDNS binding on:", bindAddrs);
+  const sockets = [];
+  mdnsSocket = sockets;
+  function handleMessage(msg, rinfo) {
     const srcIp = rinfo.address;
-    if (_localIPs().includes(srcIp)) return;
+    if (localIPs.includes(srcIp)) return;
     if (discoveredDevices.find((d) => d.host === srcIp)) return;
-    const name = parseFriendlyName(msg) || `Chromecast (${srcIp})`;
-    discoveredDevices.push({ name, host: srcIp, port: 8009 });
-    console.log("Discovered Chromecast:", name, srcIp);
-    castWindow?.webContents.send("cast-devices-updated", discoveredDevices);
-  });
-  sock.bind(MDNS_PORT, () => {
-    try {
-      sock.addMembership(MDNS_ADDR, bindAddr);
-      sock.setMulticastInterface(bindAddr);
-    } catch (e) {
-      console.error("mDNS membership error:", e.message);
+    const txt = parseDnsTxtRecords(msg);
+    const name = txt.fn || txt.md || null;
+    if (!name) {
+      probeChromecast(srcIp, `Device (${srcIp})`);
+      return;
     }
-    const sendQuery = () => {
-      sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR, (e) => {
-        if (e) console.error("mDNS query error:", e.message);
+    addDevice(srcIp, name);
+  }
+  function addDevice(ip, name) {
+    if (discoveredDevices.find((d) => d.host === ip)) return;
+    discoveredDevices.push({ name, host: ip, port: 8009 });
+    console.log("Discovered:", name, ip);
+    castWindow?.webContents.send("cast-devices-updated", discoveredDevices);
+  }
+  function probeChromecast(ip, fallbackName) {
+    if (discoveredDevices.find((d) => d.host === ip)) return;
+    const net = require("net");
+    const sock = net.createConnection({ host: ip, port: 8009, timeout: 1500 });
+    sock.on("connect", () => {
+      sock.destroy();
+      fetchChromecastInfo(ip, fallbackName);
+    });
+    sock.on("error", () => {
+    });
+    sock.on("timeout", () => sock.destroy());
+  }
+  function fetchChromecastInfo(ip, fallbackName) {
+    if (discoveredDevices.find((d) => d.host === ip)) return;
+    const http = require("http");
+    const req = http.get(`http://${ip}:8008/setup/eureka_info?options=detail`, { timeout: 2e3 }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const info = JSON.parse(Buffer.concat(chunks).toString());
+          const name = info.name || info.device_info?.name || fallbackName;
+          addDevice(ip, name);
+        } catch {
+          addDevice(ip, fallbackName);
+        }
       });
-    };
-    sendQuery();
-    discoveryInterval = setInterval(sendQuery, 1e4);
+    });
+    req.on("error", () => addDevice(ip, fallbackName));
+    req.on("timeout", () => {
+      req.destroy();
+      addDevice(ip, fallbackName);
+    });
+  }
+  bindAddrs.forEach((bindAddr) => {
+    const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+    sockets.push(sock);
+    sock.on("error", (e) => console.error("mDNS error on", bindAddr, e.message));
+    sock.on("message", handleMessage);
+    sock.bind(MDNS_PORT, () => {
+      try {
+        sock.addMembership(MDNS_ADDR, bindAddr);
+      } catch {
+      }
+      sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR);
+    });
   });
+  const sendQuery = () => {
+    sockets.forEach((sock) => {
+      try {
+        sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR);
+      } catch {
+      }
+    });
+  };
+  const lanAddr = bindAddrs.find((ip) => ip.startsWith("192.168."));
+  if (lanAddr) {
+    const subnet = lanAddr.split(".").slice(0, 3).join(".");
+    setTimeout(() => {
+      for (let i = 1; i <= 254; i++) {
+        const ip = `${subnet}.${i}`;
+        if (!localIPs.includes(ip)) probeChromecast(ip, `Chromecast (${ip})`);
+      }
+    }, 2e3);
+  }
+  sendQuery();
+  discoveryInterval = setInterval(sendQuery, 1e4);
 }
 function stopDiscovery() {
   if (discoveryInterval) {
@@ -204,10 +284,13 @@ function stopDiscovery() {
     discoveryInterval = null;
   }
   if (mdnsSocket) {
-    try {
-      mdnsSocket.close();
-    } catch {
-    }
+    const socks = Array.isArray(mdnsSocket) ? mdnsSocket : [mdnsSocket];
+    socks.forEach((s) => {
+      try {
+        s.close();
+      } catch {
+      }
+    });
     mdnsSocket = null;
   }
 }

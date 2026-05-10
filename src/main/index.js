@@ -95,32 +95,44 @@ function _localIPs() {
   return _cachedLocalIPs
 }
 
-function parseFriendlyName(msg) {
-  // Extract fn= from TXT record in the mDNS response
-  const str = msg.toString('binary')
-  const fnMatch = str.match(/fn=([^\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f]+)/)
-  if (fnMatch) return fnMatch[1].replace(/[^\x20-\x7e]/g, '').trim()
-
-  // Fallback: extract first readable label from PTR response
-  const readable = []
-  let i = 12
-  while (i < str.length) {
-    const len = str.charCodeAt(i)
-    if (len === 0 || len > 63) break
-    const label = str.slice(i + 1, i + 1 + len).replace(/[^\x20-\x7e]/g, '')
-    if (label && !label.startsWith('_')) readable.push(label)
-    i += 1 + len
+// Parse DNS TXT records — they are length-prefixed strings, not null-terminated
+// Returns { fn, id, md, ... } from Chromecast TXT records
+function parseDnsTxtRecords(msg) {
+  const result = {}
+  // Scan the entire packet for TXT record data
+  // TXT records look like: [total_len][key_len][key=value]...
+  // We look for known Chromecast TXT keys: fn, id, md, rs, ve, ca, st
+  const known = ['fn=', 'id=', 'md=', 'rs=', 've=', 'ca=', 'st=', 'bs=', 'nf=']
+  for (let i = 0; i < msg.length - 3; i++) {
+    for (const key of known) {
+      if (i + key.length > msg.length) continue
+      const chunk = msg.slice(i, i + key.length).toString('utf8')
+      if (chunk === key) {
+        // Read backwards to find the length byte, then read the value
+        let end = i + key.length
+        while (end < msg.length && msg[end] !== 0 && (msg[end] >= 0x20 || msg[end] === 0x09)) {
+          end++
+        }
+        const val = msg.slice(i + key.length, end).toString('utf8').trim()
+        if (val) result[key.slice(0, -1)] = val
+        break
+      }
+    }
   }
-  return readable[0] || null
+  return result
 }
 
 function startDiscovery(win) {
   castWindow = win
   discoveredDevices = []
 
-  // Close existing socket
+  // Close existing sockets
   if (mdnsSocket) {
-    try { mdnsSocket.close() } catch {}
+    if (Array.isArray(mdnsSocket)) {
+      mdnsSocket.forEach(s => { try { s.close() } catch {} })
+    } else {
+      try { mdnsSocket.close() } catch {}
+    }
     mdnsSocket = null
   }
   if (discoveryInterval) {
@@ -128,55 +140,126 @@ function startDiscovery(win) {
     discoveryInterval = null
   }
 
-  const interfaces = getLocalInterfaces()
-  if (!interfaces.length) return
+  const localIPs = _localIPs()
+  // Bind on all non-loopback, non-VPN interfaces
+  // Prefer 192.168.x.x / 10.0.x.x LAN addresses
+  const bindAddrs = getLocalInterfaces().filter(ip =>
+    !ip.startsWith('127.') &&
+    !ip.startsWith('172.') &&  // WSL2/Docker/Hyper-V virtual switches
+    !ip.startsWith('10.5.')    // NordVPN / other VPN ranges
+  )
 
-  // Prefer Wi-Fi / non-VPN interface (largest subnet = most local)
-  // Filter out likely VPN ranges (10.x when there's also a 192.168.x)
-  const hasLocal = interfaces.some(ip => ip.startsWith('192.168.') || ip.startsWith('10.0.'))
-  const bindAddr = interfaces.find(ip => ip.startsWith('192.168.'))
-    || interfaces.find(ip => ip.startsWith('10.0.'))
-    || interfaces[0]
+  if (!bindAddrs.length) {
+    // Last resort: try any non-loopback
+    bindAddrs.push(...getLocalInterfaces().filter(ip => !ip.startsWith('127.')))
+  }
 
-  const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true })
-  mdnsSocket = sock
+  console.log('mDNS binding on:', bindAddrs)
 
-  sock.on('error', (e) => console.error('mDNS socket error:', e.message))
+  const sockets = []
+  mdnsSocket = sockets
 
-  sock.on('message', (msg, rinfo) => {
+  function handleMessage(msg, rinfo) {
     const srcIp = rinfo.address
-    // Ignore our own machine's responses (check all interfaces, cached)
-    if (_localIPs().includes(srcIp)) return
+    if (localIPs.includes(srcIp)) return
     if (discoveredDevices.find(d => d.host === srcIp)) return
 
-    const name = parseFriendlyName(msg) || `Chromecast (${srcIp})`
-    discoveredDevices.push({ name, host: srcIp, port: 8009 })
-    console.log('Discovered Chromecast:', name, srcIp)
+    // Must respond on port 5353 to be an mDNS responder
+    const txt = parseDnsTxtRecords(msg)
+    // Only accept if it looks like a real Chromecast (has fn= or md= with Cast)
+    const name = txt.fn || txt.md || null
+    if (!name) {
+      // Could still be a Chromecast — probe port 8009
+      probeChromecast(srcIp, `Device (${srcIp})`)
+      return
+    }
+    addDevice(srcIp, name)
+  }
+
+  function addDevice(ip, name) {
+    if (discoveredDevices.find(d => d.host === ip)) return
+    discoveredDevices.push({ name, host: ip, port: 8009 })
+    console.log('Discovered:', name, ip)
     castWindow?.webContents.send('cast-devices-updated', discoveredDevices)
-  })
+  }
 
-  sock.bind(MDNS_PORT, () => {
-    try {
-      sock.addMembership(MDNS_ADDR, bindAddr)
-      sock.setMulticastInterface(bindAddr)
-    } catch (e) {
-      console.error('mDNS membership error:', e.message)
-    }
+  // TCP probe: try connecting to port 8009 (Chromecast control port)
+  function probeChromecast(ip, fallbackName) {
+    if (discoveredDevices.find(d => d.host === ip)) return
+    const net = require('net')
+    const sock = net.createConnection({ host: ip, port: 8009, timeout: 1500 })
+    sock.on('connect', () => {
+      sock.destroy()
+      // Fetch friendly name from Chromecast info endpoint
+      fetchChromecastInfo(ip, fallbackName)
+    })
+    sock.on('error', () => {})
+    sock.on('timeout', () => sock.destroy())
+  }
 
-    // Send query immediately and every 10s
-    const sendQuery = () => {
-      sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR, (e) => {
-        if (e) console.error('mDNS query error:', e.message)
+  // Chromecast devices expose device info at port 8008/eureka_info
+  function fetchChromecastInfo(ip, fallbackName) {
+    if (discoveredDevices.find(d => d.host === ip)) return
+    const http = require('http')
+    const req = http.get(`http://${ip}:8008/setup/eureka_info?options=detail`, { timeout: 2000 }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => {
+        try {
+          const info = JSON.parse(Buffer.concat(chunks).toString())
+          const name = info.name || info.device_info?.name || fallbackName
+          addDevice(ip, name)
+        } catch {
+          addDevice(ip, fallbackName)
+        }
       })
-    }
-    sendQuery()
-    discoveryInterval = setInterval(sendQuery, 10000)
+    })
+    req.on('error', () => addDevice(ip, fallbackName))
+    req.on('timeout', () => { req.destroy(); addDevice(ip, fallbackName) })
+  }
+
+  // Create one socket per interface
+  bindAddrs.forEach(bindAddr => {
+    const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+    sockets.push(sock)
+    sock.on('error', e => console.error('mDNS error on', bindAddr, e.message))
+    sock.on('message', handleMessage)
+    sock.bind(MDNS_PORT, () => {
+      try { sock.addMembership(MDNS_ADDR, bindAddr) } catch {}
+      sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR)
+    })
   })
+
+  // Re-query every 10s, also probe subnet on first run
+  const sendQuery = () => {
+    sockets.forEach(sock => {
+      try { sock.send(CAST_QUERY, MDNS_PORT, MDNS_ADDR) } catch {}
+    })
+  }
+
+  // Subnet scan: probe .1–.254 on the LAN for port 8009
+  const lanAddr = bindAddrs.find(ip => ip.startsWith('192.168.'))
+  if (lanAddr) {
+    const subnet = lanAddr.split('.').slice(0, 3).join('.')
+    setTimeout(() => {
+      for (let i = 1; i <= 254; i++) {
+        const ip = `${subnet}.${i}`
+        if (!localIPs.includes(ip)) probeChromecast(ip, `Chromecast (${ip})`)
+      }
+    }, 2000) // slight delay so mDNS has a chance first
+  }
+
+  sendQuery()
+  discoveryInterval = setInterval(sendQuery, 10000)
 }
 
 function stopDiscovery() {
   if (discoveryInterval) { clearInterval(discoveryInterval); discoveryInterval = null }
-  if (mdnsSocket) { try { mdnsSocket.close() } catch {}; mdnsSocket = null }
+  if (mdnsSocket) {
+    const socks = Array.isArray(mdnsSocket) ? mdnsSocket : [mdnsSocket]
+    socks.forEach(s => { try { s.close() } catch {} })
+    mdnsSocket = null
+  }
 }
 
 // ─── Chromecast Client ────────────────────────────────────────────────────────
