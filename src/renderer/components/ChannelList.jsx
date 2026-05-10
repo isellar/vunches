@@ -31,22 +31,25 @@ export default function ChannelList() {
     setActiveChannel(channel)
     setMpvError(null)
 
+    // Always read fresh state to avoid stale closure
+    const { selectedDevice: device, aggressiveReconnect: aggressive,
+            setCastStatus: setCS, setCastError: setCE } = useStore.getState()
+
     // If a Chromecast device is selected, cast instead of opening mpv
-    if (selectedDevice) {
-      setCastStatus('connecting')
-      setCastError(null)
+    if (device) {
+      setCS('connecting')
+      setCE(null)
       const result = await window.electron.cast.play({
-        host: channel.url,   // will be overridden below
-        ...selectedDevice,
+        ...device,
         url: channel.url,
         title: channel.name,
-        aggressive: aggressiveReconnect,
+        aggressive,
       })
       if (result?.ok) {
-        setCastStatus('playing')
+        setCS('playing')
       } else {
-        setCastStatus('error')
-        setCastError(result?.error || 'Cast failed')
+        setCS('error')
+        setCE(result?.error || 'Cast failed')
       }
       return
     }

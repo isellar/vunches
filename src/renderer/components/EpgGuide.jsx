@@ -52,15 +52,17 @@ export default function EpgGuide() {
 
   async function handlePlay(channel) {
     setActiveChannel(channel)
-    if (selectedDevice) {
-      setCastStatus('connecting')
-      setCastError(null)
+    // Read fresh state — avoids stale closure issues
+    const { selectedDevice: device, aggressiveReconnect: aggressive,
+            setCastStatus: setCS, setCastError: setCE } = useStore.getState()
+    if (device) {
+      setCS('connecting')
+      setCE(null)
       const result = await window.electron.cast.play({
-        ...selectedDevice, url: channel.url, title: channel.name,
-        aggressive: aggressiveReconnect,
+        ...device, url: channel.url, title: channel.name, aggressive,
       })
-      if (result?.ok) setCastStatus('playing')
-      else { setCastStatus('error'); setCastError(result?.error || 'Cast failed') }
+      if (result?.ok) setCS('playing')
+      else { setCS('error'); setCE(result?.error || 'Cast failed') }
     } else {
       window.electron.playStream(channel.url, channel.name)
     }
