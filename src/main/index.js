@@ -271,23 +271,52 @@ let proxyServer = null
 let proxyPort = null
 let proxyStreamUrl = null
 
-function getLocalLanIp() {
+function getLocalLanIp(targetDeviceIp) {
   const nets = os.networkInterfaces()
+  const candidates = []
   for (const ifaces of Object.values(nets)) {
     for (const iface of ifaces) {
-      if (iface.family === 'IPv4' && iface.address.startsWith('192.168.')) {
-        return iface.address
+      if (iface.family === 'IPv4' && !iface.internal && !iface.address.startsWith('127.')) {
+        candidates.push(iface.address)
       }
     }
   }
-  return null
+
+  // Best match: same /24 subnet as the target Chromecast device
+  if (targetDeviceIp) {
+    const targetSubnet = targetDeviceIp.split('.').slice(0, 3).join('.')
+    const match = candidates.find(ip => ip.startsWith(targetSubnet + '.'))
+    if (match) return match
+  }
+
+  // Fallback: same subnet as any discovered Chromecast
+  for (const device of discoveredDevices) {
+    const deviceSubnet = device.host.split('.').slice(0, 3).join('.')
+    const match = candidates.find(ip => ip.startsWith(deviceSubnet + '.'))
+    if (match) return match
+  }
+
+  // Last resort: sort by likelihood of being a real LAN interface
+  candidates.sort((a, b) => {
+    const score = (ip) => {
+      if (ip.startsWith('192.168.0.')) return 0
+      if (ip.startsWith('192.168.1.')) return 1
+      if (ip.match(/^192\.168\.\d+\./)) return 2
+      if (ip.startsWith('10.0.'))  return 3
+      if (ip.startsWith('10.'))    return 4
+      return 5
+    }
+    return score(a) - score(b)
+  })
+
+  return candidates[0] || null
 }
 
-function startStreamProxy(streamUrl) {
+function startStreamProxy(streamUrl, deviceHost) {
   return new Promise((resolve, reject) => {
     // If already proxying the same URL, reuse
     if (proxyServer && proxyStreamUrl === streamUrl && proxyPort) {
-      const lanIp = getLocalLanIp()
+      const lanIp = getLocalLanIp(deviceHost)
       return resolve(lanIp ? `http://${lanIp}:${proxyPort}/stream` : null)
     }
 
@@ -328,8 +357,8 @@ function startStreamProxy(streamUrl) {
     server.listen(0, '0.0.0.0', () => {
       proxyPort = server.address().port
       proxyServer = server
-      const lanIp = getLocalLanIp()
-      console.log('Proxy server listening on port', proxyPort, '| LAN IP:', lanIp)
+      const lanIp = getLocalLanIp(deviceHost)
+      console.log('Proxy server listening on port', proxyPort, '| LAN IP:', lanIp, '| Device:', deviceHost)
       // Open Windows Firewall for this port so Chromecast can reach us
       const { exec } = require('child_process')
       exec(`netsh advfirewall firewall add rule name="Vunches Stream Proxy" dir=in action=allow protocol=TCP localport=${proxyPort}`,
@@ -450,7 +479,7 @@ function _connect({ host, port, url, title, aggressive }) {
 
     // Start local proxy — Chromecast fetches from our machine instead of the IPTV server directly
     // This bypasses TLS cert issues and auth-in-URL problems
-    const proxyUrl = await startStreamProxy(url)
+    const proxyUrl = await startStreamProxy(url, host)
     const castUrl = proxyUrl || url  // fall back to direct if proxy fails
     console.log('Cast URL:', proxyUrl ? `proxy → ${proxyUrl}` : `direct → ${url.slice(0, 80)}`)
 
