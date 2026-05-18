@@ -8,6 +8,10 @@ export const useStore = create((set, get) => ({
   isLoading: false,
   loadError: null,
 
+  // --- Stremio (global, not per-source) ---
+  stremioAddons: [], // [ "https://torrentio.strem.fun/manifest.json", ... ]
+  stremioResults: [], // unified search results from stremio (shown in channel list)
+
   // --- UI ---
   selectedCategory: 'All',
   searchQuery: '',
@@ -115,6 +119,59 @@ export const useStore = create((set, get) => ({
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       list = list.filter(ch => ch.name?.toLowerCase().includes(q))
+    }
+    return list
+  },
+
+  // --- VOD ---
+  vodView: 'channels',        // 'channels' | 'catalog' | 'detail' | 'stream-picker'
+  vodCatalog: [],
+  vodSelected: null,
+  vodStreams: [],
+  vodHistory: [],
+  vodContentType: 'all',
+  vodSkip: 0,
+  vodHasMore: true,
+  vodSearch: '',
+  vodTorrentStatus: {},
+  vodActiveStream: null,
+
+  setStremioAddons:    (addons)  => set({ stremioAddons: addons }),
+  setStremioResults:   (results) => set({ stremioResults: results }),     // currently selected stream for playback
+
+  setVodCatalog:       (metas)   => set({ vodCatalog: metas }),
+  appendVodCatalog:    (metas)   => set(s => ({ vodCatalog: [...s.vodCatalog, ...metas] })),
+  setVodSelected:      (meta)    => set({ vodSelected: meta }),
+  setVodStreams:       (streams) => set({ vodStreams: streams }),
+  setVodContentType:   (t)       => set({ vodContentType: t }),
+  setVodSkip:          (skip)    => set({ vodSkip: skip }),
+  setVodHasMore:       (b)       => set({ vodHasMore: b }),
+  setVodSearch:        (q)       => set({ vodSearch: q }),
+  setVodView:          (view)    => set({ vodView: view }),
+  setVodActiveStream:  (stream)  => set({ vodActiveStream: stream }),
+  updateTorrentStatus: (infoHash, status) => set(s => ({
+    vodTorrentStatus: { ...s.vodTorrentStatus, [infoHash]: status }
+  })),
+
+  addVodToHistory: (item) => {
+    const { vodHistory } = get()
+    const filtered = vodHistory.filter(h => h.id !== item.id)
+    const updated = [item, ...filtered].slice(0, 50)
+    set({ vodHistory: updated })
+    window.electron?.store.set('vodHistory', updated)
+  },
+
+  setVodHistory: (vodHistory) => set({ vodHistory }),
+
+  getFilteredCatalog: () => {
+    const { vodCatalog, vodContentType, vodSearch } = get()
+    let list = vodCatalog
+    if (vodContentType !== 'all') {
+      list = list.filter(m => m.type === vodContentType)
+    }
+    if (vodSearch.trim()) {
+      const q = vodSearch.toLowerCase()
+      list = list.filter(m => m.name?.toLowerCase().includes(q))
     }
     return list
   },

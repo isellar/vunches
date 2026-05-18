@@ -21,6 +21,25 @@ contextBridge.exposeInMainWorld('electron', {
   exportData:          ()           => ipcRenderer.invoke('export-data'),
   importData:          ()           => ipcRenderer.invoke('import-data'),
 
+  // Stremio
+  stremioLoadAll:       (opts)        => ipcRenderer.invoke('stremio-load-all', opts),
+  stremioLoadCatalog:   (opts)        => ipcRenderer.invoke('stremio-load-catalog', opts),
+  stremioSearch:       (opts)        => ipcRenderer.invoke('stremio-search', opts),
+  stremioGetMeta:      (opts)        => ipcRenderer.invoke('stremio-get-meta', opts),
+  stremioGetStreams:   (opts)        => ipcRenderer.invoke('stremio-get-streams', opts),
+
+  // Torrent
+  torrentCreateStream:      (opts)   => ipcRenderer.invoke('torrent-create-stream', opts),
+  torrentDestroyStream:     (opts)   => ipcRenderer.invoke('torrent-destroy-stream', opts),
+  torrentDestroyInfoHash:   (opts)   => ipcRenderer.invoke('torrent-destroy-info-hash', opts),
+  torrentStatus:            ()       => ipcRenderer.invoke('torrent-status'),
+
+  // Torrent events
+  onTorrentProgress:  (cb) => ipcRenderer.on('torrent-progress', (_e, d) => cb(d)),
+  offTorrentProgress: ()   => ipcRenderer.removeAllListeners('torrent-progress'),
+  onTorrentError:     (cb) => ipcRenderer.on('torrent-error',    (_e, d) => cb(d)),
+  offTorrentError:    ()   => ipcRenderer.removeAllListeners('torrent-error'),
+
   // Progress events
   onPlaylistProgress:  (cb) => ipcRenderer.on('playlist-progress', (_e, d) => cb(d)),
   offPlaylistProgress: ()   => ipcRenderer.removeAllListeners('playlist-progress'),

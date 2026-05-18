@@ -1,22 +1,62 @@
 import { useStore } from '../store/useStore'
 
 export default function Titlebar({ onReload, onOpenSettings }) {
-  const { searchQuery, setSearchQuery, channels, showGuide, setShowGuide, epgStatus } = useStore()
+  const {
+    searchQuery, setSearchQuery, channels, showGuide, setShowGuide, epgStatus,
+    vodSearch, setVodSearch, vodView, stremioAddons, setStremioResults, setVodCatalog,
+  } = useStore()
+
+  async function handleSearch(val) {
+    if (vodView === 'catalog') {
+      // VOD mode: filter local catalog by name
+      setVodSearch(val)
+      return
+    }
+
+    // Channel mode: filter channels locally + query stremio
+    setSearchQuery(val)
+
+    if (val.trim() && stremioAddons?.length) {
+      try {
+        const result = await window.electron.stremioSearch({
+          addonUrls: stremioAddons,
+          query: val,
+          types: ['movie', 'series'],
+        })
+        setStremioResults(result.metas || [])
+      } catch {
+        setStremioResults([])
+      }
+    } else {
+      setStremioResults([])
+    }
+  }
+
+  function handleClear() {
+    if (vodView === 'catalog') {
+      setVodSearch('')
+    } else {
+      setSearchQuery('')
+      setStremioResults([])
+    }
+  }
+
+  const searchValue = vodView === 'catalog' ? vodSearch : searchQuery
+  const itemCount = vodView === 'catalog'
+    ? useStore.getState().getFilteredCatalog().length
+    : channels.length
 
   return (
     <div className="flex-shrink-0 bg-[#0f0f0f] border-b border-white/5">
 
-      {/* ── Row 1: drag region + app name (sits behind Windows controls) ── */}
       <div className="drag-region flex items-center h-9 px-4">
         <span className="no-drag text-purple-400 font-bold text-sm tracking-widest select-none">
           VUNCHES
         </span>
       </div>
 
-      {/* ── Row 2: toolbar ── */}
       <div className="flex items-center gap-2 px-3 pb-2.5">
 
-        {/* Search */}
         <div className="no-drag relative flex-1 max-w-md">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none"
             fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -25,17 +65,17 @@ export default function Titlebar({ onReload, onOpenSettings }) {
           </svg>
           <input
             type="text"
-            placeholder="Search channels..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={vodView === 'catalog' ? "Search catalog..." : "Search channels & movies..."}
+            value={searchValue}
+            onChange={(e) => handleSearch(e.target.value)}
             className="w-full bg-white/5 text-sm text-gray-200 placeholder-gray-600
                        rounded-lg pr-8 py-1.5 outline-none border border-white/8
                        focus:border-purple-500/50 focus:bg-white/7 transition-colors"
             style={{ paddingLeft: '2rem' }}
           />
-          {searchQuery && (
+          {searchValue && (
             <button
-              onClick={() => setSearchQuery('')}
+              onClick={handleClear}
               className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center
                          justify-center text-gray-500 hover:text-gray-200 rounded transition-colors"
             >
@@ -46,15 +86,13 @@ export default function Titlebar({ onReload, onOpenSettings }) {
           )}
         </div>
 
-        {/* Channel count */}
         <span className="text-gray-600 text-xs flex-shrink-0 tabular-nums px-1">
-          {channels.length.toLocaleString()}
+          {itemCount.toLocaleString()}
         </span>
 
         <div className="w-px h-4 bg-white/8 flex-shrink-0" />
 
-        {/* Guide button — only when EPG loaded */}
-        {epgStatus === 'ready' && (
+        {vodView === 'channels' && epgStatus === 'ready' && (
           <ToolbarButton
             onClick={() => setShowGuide(!showGuide)}
             title="TV Guide"
@@ -69,10 +107,9 @@ export default function Titlebar({ onReload, onOpenSettings }) {
           />
         )}
 
-        {/* Reload */}
         <ToolbarButton
           onClick={onReload}
-          title="Reload playlist"
+          title={vodView === 'catalog' ? "Reload catalog" : "Reload playlist"}
           icon={
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -82,7 +119,6 @@ export default function Titlebar({ onReload, onOpenSettings }) {
           label="Reload"
         />
 
-        {/* Settings */}
         <ToolbarButton
           onClick={onOpenSettings}
           title="Settings"

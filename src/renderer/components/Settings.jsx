@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useStore } from '../store/useStore'
 
-const TAB = { SOURCES: 'sources', EPG: 'epg', GENERAL: 'general' }
+const TAB = { SOURCES: 'sources', ADDONS: 'addons', EPG: 'epg', GENERAL: 'general' }
 
 export default function Settings({ onClose, onLoadSource, onLoadEpg }) {
   const [tab, setTab] = useState(TAB.SOURCES)
@@ -26,6 +26,7 @@ export default function Settings({ onClose, onLoadSource, onLoadEpg }) {
         <div className="flex border-b border-white/8 flex-shrink-0">
           {[
             { id: TAB.SOURCES, label: 'Sources' },
+            { id: TAB.ADDONS,  label: 'Addons' },
             { id: TAB.EPG,     label: 'EPG' },
             { id: TAB.GENERAL, label: 'General' },
           ].map(t => (
@@ -42,6 +43,7 @@ export default function Settings({ onClose, onLoadSource, onLoadEpg }) {
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto">
           {tab === TAB.SOURCES && <SourcesTab onClose={onClose} onLoadSource={onLoadSource} />}
+          {tab === TAB.ADDONS  && <AddonsTab onClose={onClose} />}
           {tab === TAB.EPG     && <EpgTab onLoadEpg={onLoadEpg} />}
           {tab === TAB.GENERAL && <GeneralTab onClose={onClose} />}
         </div>
@@ -62,19 +64,27 @@ function SourcesTab({ onClose, onLoadSource }) {
   const [editSource, setEditSource] = useState(null)
 
   async function handleDelete(id) {
-    if (!confirm('Remove this source?')) return
-    const updated = sources.filter(s => s.id !== id)
-    setSources(updated)
-    await window.electron.store.set('sources', updated)
-    if (activeSourceId === id && updated.length > 0) {
-      setActiveSourceId(updated[0].id)
-      onLoadSource(updated[0])
-    }
-  }
 
   function handleEdit(source) {
     setEditSource(source)
     setMode(source.type === 'xtream' ? 'add-xtream' : 'add-m3u')
+  }
+
+  if (mode === 'add-m3u' || (mode === 'edit' && editSource?.type === 'm3u')) {
+    return <M3uForm existing={editSource} onDone={() => { setMode(null); setEditSource(null) }}
+      onLoadSource={onLoadSource} onClose={onClose} />
+  }
+  if (mode === 'add-xtream') {
+    return <XtreamForm existing={editSource} onDone={() => { setMode(null); setEditSource(null) }}
+      onLoadSource={onLoadSource} onClose={onClose} />
+  }
+  }
+
+  function handleEdit(source) {
+    setEditSource(source)
+    setMode(source.type === 'xtream' ? 'add-xtream'
+      : source.type === 'stremio' ? 'add-stremio'
+      : 'add-m3u')
   }
 
   async function handleActivate(source) {
@@ -90,6 +100,10 @@ function SourcesTab({ onClose, onLoadSource }) {
   }
   if (mode === 'add-xtream') {
     return <XtreamForm existing={editSource} onDone={() => { setMode(null); setEditSource(null) }}
+      onLoadSource={onLoadSource} onClose={onClose} />
+  }
+  if (mode === 'add-stremio' || (mode === 'edit' && editSource?.type === 'stremio')) {
+    return <StremioForm existing={editSource} onDone={() => { setMode(null); setEditSource(null) }}
       onLoadSource={onLoadSource} onClose={onClose} />
   }
 
@@ -314,6 +328,170 @@ function XtreamForm({ existing, onDone, onLoadSource, onClose }) {
         {error && <p className="text-red-400 text-xs">{error}</p>}
         <button type="submit" disabled={loading || !host.trim() || !username.trim() || !password.trim()} className={btnCls}>
           {loading ? 'Connecting...' : existing ? 'Save Changes' : 'Connect & Load'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+// ─── Addons Tab ──────────────────────────────────────────────────────────────
+
+const CINEMETA_URL = 'https://v3-cinemeta.strem.io'
+
+function AddonsTab({ onClose }) {
+  const { stremioAddons, setStremioAddons, setVodCatalog } = useStore()
+  // Pre-populate with Cinemeta if no addons configured
+  const initialAddons = stremioAddons?.length ? stremioAddons : [CINEMETA_URL]
+  const [addonList, setAddonList] = useState(initialAddons)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [validating, setValidating] = useState({})
+
+  function addRow() {
+    setAddonList([...addonList, ''])
+  }
+
+  function removeRow(idx) {
+    setAddonList(addonList.filter((_, i) => i !== idx))
+  }
+
+  function updateRow(idx, val) {
+    const updated = [...addonList]
+    updated[idx] = val
+    setAddonList(updated)
+  }
+
+  async function validateUrl(idx, url) {
+    const trimmed = url.trim()
+    if (!trimmed) return
+    setValidating(v => ({ ...v, [idx]: 'loading' }))
+    try {
+      let base = trimmed.replace(/\/+$/, '')
+      if (base.endsWith('/manifest.json')) base = base.slice(0, -'/manifest.json'.length)
+      const resp = await fetch(base + '/manifest.json')
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const json = await resp.json()
+      if (!json.id || !json.name) throw new Error('Invalid manifest')
+      setValidating(v => ({ ...v, [idx]: 'valid' }))
+    } catch {
+      setValidating(v => ({ ...v, [idx]: 'invalid' }))
+    }
+  }
+
+  async function handleSave(e) {
+    e.preventDefault()
+    const raw = addonList.map(u => u.trim()).filter(Boolean)
+    // Always include Cinemeta for catalog browsing
+    const valid = raw.includes(CINEMETA_URL) ? raw : [CINEMETA_URL, ...raw]
+    setSaving(true)
+    let saveError = ''
+    try {
+      setStremioAddons(valid)
+      await window.electron.store.set('stremioAddons', valid)
+      // Reload VOD catalogs
+      if (valid.length) {
+        const result = await window.electron.stremioLoadAll({
+          addonUrls: valid,
+          types: ['movie', 'series'],
+        })
+        if (result.error) {
+          saveError = result.error
+          setError(saveError)
+        } else {
+          useStore.getState().setVodContentType('all')
+          setVodCatalog(result.metas || [])
+        }
+      } else {
+        setVodCatalog([])
+      }
+      if (!saveError) onClose()
+    } catch (err) {
+      setError(err.message || 'Failed to save')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="px-5 py-5">
+      <h3 className="text-gray-200 font-medium mb-1">Stremio Addons</h3>
+      <p className="text-xs text-gray-600 mb-4">Manage community addons for VOD content. Changes are saved globally, not per-source.</p>
+
+      <form onSubmit={handleSave} className="space-y-3">
+        <div>
+          <label className="text-xs text-gray-500 mb-1.5 block">Addon Manifest URLs</label>
+          <div className="space-y-2">
+            {addonList.map((url, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <div className="flex-1 relative">
+                  <input type="url" value={url}
+                    onChange={e => updateRow(i, e.target.value)}
+                    onBlur={() => validateUrl(i, url)}
+                    placeholder="https://addon.example.com/manifest.json"
+                    className={`${inputCls} pr-8 ${validating[i] === 'invalid' ? 'border-red-500/40' : validating[i] === 'valid' ? 'border-green-500/40' : ''}`} />
+                  {validating[i] === 'loading' && (
+                    <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 text-[10px]">...</span>
+                  )}
+                  {validating[i] === 'valid' && (
+                    <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                  {validating[i] === 'invalid' && (
+                    <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  )}
+                </div>
+                {addonList.length > 1 && (
+                  <button type="button" onClick={() => removeRow(i)}
+                    className="text-gray-600 hover:text-red-400 p-1 flex-shrink-0 transition-colors">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={addRow}
+            className="mt-2 flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Add another URL
+          </button>
+        </div>
+
+        <div>
+          <p className="text-[10px] text-gray-700 mb-1.5">Quick add:</p>
+          <div className="flex flex-wrap gap-1">
+            {[
+              { name: 'Cinemeta (catalog)', url: 'https://v3-cinemeta.strem.io', desc: 'Browse movies & series' },
+              { name: 'Torrentio (streams)', url: 'https://torrentio.strem.fun', desc: 'Torrent streams' },
+              { name: 'Comet (streams)', url: 'https://comet.elfhosted.com', desc: 'Torrent streams' },
+            ].map(a => (
+              <button key={a.url} type="button" onClick={() => {
+                if (!addonList.some(u => u.trim() === a.url)) setAddonList([...addonList.filter(u => u.trim()), a.url])
+              }}
+                className="text-[10px] px-2 py-1 rounded-full bg-white/3 border border-white/8
+                           text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
+                title={a.desc}>
+                {a.name}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {addonList.filter(u => u.trim()).length > 0 && (
+          <p className="text-xs text-gray-600">
+            {addonList.filter(u => u.trim()).length} addon{addonList.filter(u => u.trim()).length !== 1 ? 's' : ''} configured
+          </p>
+        )}
+
+        {error && <p className="text-red-400 text-xs">{error}</p>}
+        <button type="submit" disabled={saving} className={btnCls}>
+          {saving ? 'Saving...' : 'Save Addons'}
         </button>
       </form>
     </div>

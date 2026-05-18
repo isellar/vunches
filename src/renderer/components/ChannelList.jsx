@@ -9,6 +9,7 @@ export default function ChannelList() {
     favorites, toggleFavorite, searchQuery, selectedCategory,
     selectedDevice, setCastStatus, setCastError, aggressiveReconnect,
     epgStatus, showGuide,
+    stremioResults, setVodSelected, setVodView, stremioAddons,
   } = useStore()
 
   const channels = getFilteredChannels()
@@ -64,6 +65,12 @@ export default function ChannelList() {
   }, [setActiveChannel])
 
   const empty = channels.length === 0
+  const showStremio = searchQuery.trim() && stremioResults.length > 0
+
+  function handleStremioClick(meta) {
+    setVodSelected(meta)
+    setVodView('detail')
+  }
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -88,6 +95,41 @@ export default function ChannelList() {
           {channels.length.toLocaleString()} channel{channels.length !== 1 ? 's' : ''}
         </span>
       </div>
+
+      {/* Stremio VOD results (appear inline when searching) */}
+      {showStremio && (
+        <div className="border-b border-white/5 flex-shrink-0">
+          <div className="px-5 pt-3 pb-1 flex items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-green-600/30 text-green-300">VOD</span>
+            <span className="text-xs text-gray-500">{stremioResults.length} result{stremioResults.length !== 1 ? 's' : ''} from addons</span>
+          </div>
+          <div className="flex gap-2 px-5 pb-3 overflow-x-auto">
+            {stremioResults.slice(0, 10).map(meta => (
+              <button key={meta.id} onClick={() => handleStremioClick(meta)}
+                className="flex-shrink-0 w-28 text-left rounded-lg overflow-hidden bg-white/3 border border-white/5
+                           hover:border-green-500/30 hover:bg-white/5 transition-all group">
+                <div className="aspect-[2/3] bg-[#141414] overflow-hidden">
+                  {meta.poster ? (
+                    <img src={meta.poster} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                      loading="lazy" onError={(e) => { e.target.style.display = 'none' }} />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <svg className="w-5 h-5 text-gray-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                          d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </div>
+                  )}
+                </div>
+                <div className="p-1.5">
+                  <p className="text-[10px] text-gray-300 truncate group-hover:text-green-300 transition-colors leading-tight">{meta.name}</p>
+                  <p className="text-[9px] text-gray-600 mt-0.5 truncate">{meta.releaseInfo || meta.type}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Virtual channel list */}
       {empty ? (

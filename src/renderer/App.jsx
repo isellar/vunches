@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore } from './store/useStore'
 import Sidebar from './components/Sidebar'
 import ChannelList from './components/ChannelList'
+import CatalogBrowser from './components/CatalogBrowser'
+import ContentDetail from './components/ContentDetail'
+import StreamPicker from './components/StreamPicker'
 import Titlebar from './components/Titlebar'
 import Setup from './components/Setup'
 import Settings from './components/Settings'
@@ -20,6 +23,11 @@ export default function App() {
     activeSourceId, setActiveSourceId,
     searchQuery, setSearchQuery,
     activeChannel, toggleFavorite, favorites,
+    // VOD
+    stremioAddons, setStremioAddons,
+    setVodCatalog, setVodContentType, setVodView, vodView,
+    setVodSearch, setVodHistory,
+    updateTorrentStatus,
   } = useStore()
 
   const [initializing, setInitializing] = useState(true)
@@ -37,7 +45,7 @@ export default function App() {
 
     async function init() {
       const [savedSources, savedFavs, savedRecent, savedDevice, savedAggressive,
-             savedEpgUrl, savedActiveId, savedRefresh] = await Promise.all([
+             savedEpgUrl, savedActiveId, savedRefresh, savedVodHistory, savedAddons] = await Promise.all([
         window.electron.store.get('sources'),
         window.electron.store.get('favorites'),
         window.electron.store.get('recentlyWatched'),
@@ -46,18 +54,39 @@ export default function App() {
         window.electron.store.get('epgUrl'),
         window.electron.store.get('activeSourceId'),
         window.electron.store.get('epgRefreshInterval'),
+        window.electron.store.get('vodHistory'),
+        window.electron.store.get('stremioAddons'),
       ])
 
       setSources(savedSources || [])
       setFavorites(savedFavs || [])
       setRecentlyWatched(savedRecent || [])
+      setVodHistory(savedVodHistory || [])
       if (savedDevice) selectDevice(savedDevice)
       if (savedAggressive != null) setAggressiveReconnect(savedAggressive)
       if (savedEpgUrl) setEpgUrl(savedEpgUrl)
       if (savedRefresh) useStore.setState({ epgRefreshInterval: savedRefresh })
 
-      // Load the active source
-      const allSources = savedSources || []
+      // Stremio addons are global — ensure Cinemeta is always included for catalog browsing
+      const CINEMETA = 'https://v3-cinemeta.strem.io'
+      const addonsWithCatalog = savedAddons?.length
+        ? (savedAddons.includes(CINEMETA) ? savedAddons : [CINEMETA, ...savedAddons])
+        : []
+      if (addonsWithCatalog.length) {
+        setStremioAddons(addonsWithCatalog)
+        if (addonsWithCatalog.length !== (savedAddons?.length || 0)) {
+          window.electron.store.set('stremioAddons', addonsWithCatalog)
+        }
+        loadVodCatalogs(addonsWithCatalog)
+      }
+
+      // Clean up old stremio-type sources and load the active source
+      const allSources = (savedSources || []).filter(s => s.type !== 'stremio' && s.url)
+      if (allSources.length !== (savedSources || []).length) {
+        // Persist the cleaned list
+        setSources(allSources)
+        window.electron.store.set('sources', allSources)
+      }
       const activeId = savedActiveId || allSources[0]?.id || null
       if (activeId) setActiveSourceId(activeId)
 
@@ -84,10 +113,17 @@ export default function App() {
     window.electron.cast.onReconnected(()  => setCastStatus('playing'))
     window.electron.cast.onError(e => { setCastStatus('error'); setCastError(e) })
 
+    // Torrent
+    window.electron.onTorrentProgress(status => {
+      updateTorrentStatus(status.infoHash, status)
+    })
+
     return () => {
       window.electron.cast.offAll()
       window.electron.offPlaylistProgress()
       window.electron.offEpgProgress()
+      window.electron.offTorrentProgress()
+      window.electron.offTorrentError()
       if (epgRefreshTimer.current) clearInterval(epgRefreshTimer.current)
     }
   }, [])
@@ -107,10 +143,9 @@ export default function App() {
       const tag = e.target.tagName
       const typing = tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable
 
-      // / — focus search (even when typing in other inputs if search not focused)
       if (e.key === '/' && !typing) {
         e.preventDefault()
-        document.querySelector('input[placeholder="Search channels..."]')?.focus()
+        document.querySelector('input[placeholder^="Search"]')?.focus()
         return
       }
 
@@ -118,11 +153,15 @@ export default function App() {
 
       if (e.key === 'Escape') {
         if (showGuide)       { setShowGuide(false); return }
+        const view = useStore.getState().vodView
+        if (view === 'stream-picker') { useStore.getState().setVodView('detail'); return }
+        if (view === 'detail')        { useStore.getState().setVodView('catalog'); return }
+        if (view === 'catalog')       { useStore.getState().setVodView('channels'); return }
         if (searchQuery)     { setSearchQuery(''); return }
         if (showSettings)    { setShowSettings(false); return }
       }
       if (e.key === 'g' || e.key === 'G') {
-        if (useStore.getState().epgStatus === 'ready') setShowGuide(!showGuide)
+        if (useStore.getState().epgStatus === 'ready' && vodView === 'channels') setShowGuide(!showGuide)
       }
       if (e.key === 'f' || e.key === 'F') {
         const ch = useStore.getState().activeChannel
@@ -136,10 +175,16 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [showGuide, searchQuery, showSettings])
+  }, [showGuide, searchQuery, showSettings, vodView])
 
   // ── Load source ───────────────────────────────────────────────────────────
   async function loadSource(source) {
+    if (!source || source.type === 'stremio' || !source.url) {
+      // Skip stremio sources (now global) or sources without URLs
+      if (source?.type === 'stremio') return
+      setChannels([])
+      return
+    }
     setLoading(true)
     setLoadError(null)
     setLoadProgress(null)
@@ -155,6 +200,7 @@ export default function App() {
       }
 
       setChannels(channels)
+      setVodView('channels')
 
       // Auto-detect EPG if none set
       const currentEpg = useStore.getState().epgUrl
@@ -168,8 +214,20 @@ export default function App() {
     }
   }
 
+  async function loadVodCatalogs(addonUrls) {
+    if (!addonUrls?.length) return
+    try {
+      const result = await window.electron.stremioLoadAll({
+        addonUrls,
+        types: ['movie', 'series'],
+      })
+      if (result.error) return
+      setVodContentType('all')
+      setVodCatalog(result.metas || [])
+    } catch {}
+  }
+
   async function loadXtreamSource(source) {
-    // Fetch live categories + streams and map to channel format
     const [cats, streams] = await Promise.all([
       window.electron.xtreamFetch({ host: source.host, username: source.username, password: source.password, action: 'get_live_categories' }),
       window.electron.xtreamFetch({ host: source.host, username: source.username, password: source.password, action: 'get_live_streams' }),
@@ -192,7 +250,6 @@ export default function App() {
     let url = tvgUrlFromHeader
     if (!url && source.type === 'm3u') url = await window.electron.detectEpgUrl(source.url)
     if (!url && source.type === 'xtream') {
-      // Xtream EPG endpoint
       url = `${source.host.replace(/\/$/, '')}/xmltv.php?username=${source.username}&password=${source.password}`
     }
     if (!url) return
@@ -249,7 +306,7 @@ export default function App() {
           {loadError && !isLoading && (
             <div className="flex items-center justify-center flex-1">
               <div className="text-center">
-                <p className="text-red-400 mb-2 font-medium">Failed to load playlist</p>
+                <p className="text-red-400 mb-2 font-medium">Failed to load</p>
                 <p className="text-gray-500 text-sm mb-4">{loadError}</p>
                 <div className="flex gap-3 justify-center">
                   <button onClick={() => activeSource && loadSource(activeSource)}
@@ -264,8 +321,11 @@ export default function App() {
               </div>
             </div>
           )}
-          {!isLoading && !loadError && <ChannelList />}
-          {showGuide && <EpgGuide />}
+          {!isLoading && !loadError && vodView === 'channels' && <ChannelList />}
+          {!isLoading && !loadError && vodView === 'catalog' && <CatalogBrowser />}
+          {!isLoading && !loadError && vodView === 'detail' && <ContentDetail />}
+          {!isLoading && !loadError && vodView === 'stream-picker' && <StreamPicker />}
+          {showGuide && vodView === 'channels' && <EpgGuide />}
         </main>
       </div>
 

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "IPTV desktop streaming client",
   "main": "out/main/index.js",
+  "bin": {
+    "vunches": "src/cli/index.js"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build && electron-builder",
@@ -29,12 +32,12 @@
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.24",
     "castv2": "^0.1.10",
-    "electron-store": "^10.0.0",
     "hls.js": "^1.5.17",
     "iptv-playlist-parser": "^0.9.0",
     "mdns-js": "^1.0.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "webtorrent": "^2.8.5",
     "zustand": "^5.0.3"
   },
   "build": {
