@@ -4,30 +4,35 @@ const path = require('path')
 const http = require('http')
 const { spawn } = require('child_process')
 
-const DEFAULT_FFMPEG_PATH = 'C:\\Users\\ian\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin\\ffmpeg.exe'
-
 function findFfmpeg() {
-  const candidates = [
-    DEFAULT_FFMPEG_PATH,
-    'ffmpeg',
-    'C:\\ffmpeg\\bin\\ffmpeg.exe',
-    'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
-  ]
-  try {
-    const wingetBase = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Packages')
-    if (fs.existsSync(wingetBase)) {
-      const pkgs = fs.readdirSync(wingetBase).filter(d => d.startsWith('Gyan.FFmpeg'))
-      for (const pkg of pkgs) {
-        const bins = path.join(wingetBase, pkg)
-        const subs = fs.readdirSync(bins)
-        for (const sub of subs) {
-          const ffpath = path.join(bins, sub, 'bin', 'ffmpeg.exe')
-          if (fs.existsSync(ffpath)) candidates.unshift(ffpath)
+  if (process.platform === 'win32') {
+    const candidates = [
+      'ffmpeg',
+      'C:\\ffmpeg\\bin\\ffmpeg.exe',
+      'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+    ]
+    try {
+      const wingetBase = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Packages')
+      if (fs.existsSync(wingetBase)) {
+        const pkgs = fs.readdirSync(wingetBase).filter(d => d.startsWith('Gyan.FFmpeg'))
+        for (const pkg of pkgs) {
+          const bins = path.join(wingetBase, pkg)
+          const subs = fs.readdirSync(bins)
+          for (const sub of subs) {
+            const ffpath = path.join(bins, sub, 'bin', 'ffmpeg.exe')
+            if (fs.existsSync(ffpath)) candidates.unshift(ffpath)
+          }
         }
       }
-    }
-  } catch {}
-  return candidates[0]
+    } catch {}
+    return candidates[0]
+  }
+
+  const candidates = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/snap/bin/ffmpeg', 'ffmpeg']
+  for (const c of candidates) {
+    if (c.startsWith('/') ? fs.existsSync(c) : true) return c
+  }
+  return 'ffmpeg'
 }
 
 function getLocalLanIp(targetDeviceIp, devices = []) {
@@ -89,6 +94,7 @@ function resolveRedirects(url, maxRedirects = 5) {
 }
 
 function ensureFirewallRule() {
+  if (process.platform !== 'win32') return
   const { exec } = require('child_process')
   exec('netsh advfirewall firewall show rule name="Vunches Stream Proxy"', (err, stdout) => {
     if (!err && stdout.includes('Vunches Stream Proxy')) return

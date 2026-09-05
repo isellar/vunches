@@ -2,15 +2,22 @@ const { spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 
-const MPV_CANDIDATES = [
-  'C:\\Program Files\\MPV Player\\mpv.exe',
-  'C:\\Program Files (x86)\\MPV Player\\mpv.exe',
-  'mpv',
-]
+const MPV_CANDIDATES = process.platform === 'win32'
+  ? [
+      'C:\\Program Files\\MPV Player\\mpv.exe',
+      'C:\\Program Files (x86)\\MPV Player\\mpv.exe',
+      'mpv',
+    ]
+  : [
+      '/usr/bin/mpv',
+      '/usr/local/bin/mpv',
+      '/snap/bin/mpv',
+      'mpv',
+    ]
 
 function findMpv() {
   for (const candidate of MPV_CANDIDATES) {
-    if (fs.existsSync(candidate)) return candidate
+    if (candidate.startsWith('/') ? fs.existsSync(candidate) : true) return candidate
   }
   return MPV_CANDIDATES[0]
 }

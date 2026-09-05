@@ -28,8 +28,10 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#0f0f0f',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#0f0f0f', symbolColor: '#ffffff', height: 36 },
+    ...(process.platform === 'linux'
+      ? { frame: true }
+      : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#0f0f0f', symbolColor: '#ffffff', height: 36 } }
+    ),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

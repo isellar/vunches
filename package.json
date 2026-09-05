@@ -51,6 +51,10 @@
     ],
     "win": {
       "target": "nsis"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "AudioVideo"
     }
   }
 }
