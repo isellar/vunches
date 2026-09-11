@@ -8,6 +8,7 @@ const { join } = require('path')
 if (process.platform === 'linux') app.disableHardwareAcceleration()
 
 const config = require('../shared/config')
+const deviceCache = require('../shared/device-cache')
 const { MdnsDiscovery } = require('../shared/mdns')
 const { HlsProxy, ensureFirewallRule } = require('../shared/hls-proxy')
 const { CastClient } = require('../shared/cast-client')
@@ -61,6 +62,7 @@ function createWindow() {
 
 mdns.on('device', (device) => {
   discoveredDevices = mdns.getDevices()
+  deviceCache.writeCache(discoveredDevices)
   win?.webContents.send('cast-devices-updated', discoveredDevices)
 })
 

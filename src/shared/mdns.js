@@ -41,7 +41,7 @@ function parseDnsTxtRecords(msg) {
       const chunk = msg.slice(i, i + key.length).toString('utf8')
       if (chunk === key) {
         let end = i + key.length
-        while (end < msg.length && msg[end] !== 0 && (msg[end] >= 0x20 || msg[end] === 0x09)) {
+        while (end < msg.length && msg[end] >= 0x20) {
           end++
         }
         const val = msg.slice(i + key.length, end).toString('utf8').trim()

@@ -3,6 +3,7 @@
 const path = require('path')
 
 const config = require('../shared/config')
+const deviceCache = require('../shared/device-cache')
 const { MdnsDiscovery } = require('../shared/mdns')
 const { HlsProxy } = require('../shared/hls-proxy')
 const { CastClient } = require('../shared/cast-client')
@@ -114,7 +115,22 @@ async function loadChannels(opts = {}) {
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
-async function cmdDevices() {
+async function cmdDevices(opts = {}) {
+  if (!opts.fresh) {
+    const cache = deviceCache.readCache()
+    if (deviceCache.isFresh(cache)) {
+      const ageSec = Math.round((Date.now() - cache.updatedAt) / 1000)
+      print(`Using cached results from ${ageSec}s ago (--fresh to rescan):\n`)
+      for (const d of cache.devices) {
+        print(`  ${d.name}`)
+        print(`    Host: ${d.host}:${d.port}`)
+        print('')
+      }
+      print(`Found ${cache.devices.length} device(s).`)
+      return
+    }
+  }
+
   const mdns = new MdnsDiscovery()
   print('Scanning for Chromecast devices...\n')
 
@@ -131,11 +147,33 @@ async function cmdDevices() {
   mdns.stop()
 
   const devices = mdns.getDevices()
+  deviceCache.writeCache(devices)
   if (!devices.length) {
     print('No Chromecast devices found.')
   } else {
     print(`Found ${devices.length} device(s).`)
   }
+}
+
+async function cmdDaemon() {
+  const mdns = new MdnsDiscovery()
+  print('Watching for Chromecast devices (Ctrl+C to stop)...\n')
+
+  mdns.on('device', (d) => {
+    print(`  Found: ${d.name} (${d.host}:${d.port})`)
+    deviceCache.writeCache(mdns.getDevices())
+  })
+  mdns.on('error', (e) => {})
+
+  mdns.start()
+  deviceCache.writeCache(mdns.getDevices())
+
+  process.on('SIGINT', () => {
+    mdns.stop()
+    process.exit(0)
+  })
+
+  await new Promise(() => {})
 }
 
 async function cmdChannels(query, opts = {}) {
@@ -203,21 +241,31 @@ async function cmdCast(name, opts = {}) {
     print(`Multiple matches for "${name}", using closest: "${ch.name}"`)
   }
 
+  const matchesDeviceFlag = (d) =>
+    d.name.toLowerCase().includes(opts.device.toLowerCase()) || d.host === opts.device
+
   let device
   if (opts.device) {
-    const mdns = new MdnsDiscovery()
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 6000)
-      mdns.on('device', (d) => {
-        if (d.name.toLowerCase().includes(opts.device.toLowerCase()) || d.host === opts.device) {
-          device = d
-          clearTimeout(timer)
-          mdns.stop()
-          resolve()
-        }
+    const cache = deviceCache.readCache()
+    if (deviceCache.isFresh(cache)) {
+      device = cache.devices.find(matchesDeviceFlag)
+    }
+    if (!device) {
+      const mdns = new MdnsDiscovery()
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 6000)
+        mdns.on('device', (d) => {
+          if (matchesDeviceFlag(d)) {
+            device = d
+            clearTimeout(timer)
+            mdns.stop()
+            resolve()
+          }
+        })
+        mdns.start()
       })
-      mdns.start()
-    })
+      if (mdns.getDevices().length) deviceCache.writeCache(mdns.getDevices())
+    }
     if (!device) {
       print(`Device "${opts.device}" not found on network.`)
       process.exit(1)
@@ -227,22 +275,28 @@ async function cmdCast(name, opts = {}) {
     if (saved) {
       device = saved
     } else {
-      const mdns = new MdnsDiscovery()
-      print('No device specified. Scanning for Chromecasts...')
-      await new Promise(async (resolve) => {
-        let found = false
-        const timer = setTimeout(resolve, 6000)
-        mdns.on('device', (d) => {
-          if (!found) {
-            found = true
-            device = d
-            clearTimeout(timer)
-            mdns.stop()
-            resolve()
-          }
+      const cache = deviceCache.readCache()
+      if (deviceCache.isFresh(cache)) {
+        device = cache.devices[0]
+      } else {
+        const mdns = new MdnsDiscovery()
+        print('No device specified. Scanning for Chromecasts...')
+        await new Promise(async (resolve) => {
+          let found = false
+          const timer = setTimeout(resolve, 6000)
+          mdns.on('device', (d) => {
+            if (!found) {
+              found = true
+              device = d
+              clearTimeout(timer)
+              mdns.stop()
+              resolve()
+            }
+          })
+          mdns.start()
         })
-        mdns.start()
-      })
+        if (mdns.getDevices().length) deviceCache.writeCache(mdns.getDevices())
+      }
       if (!device) {
         print('No Chromecast devices found. Use --device <name> to specify.')
         process.exit(1)
@@ -452,7 +506,8 @@ function showHelp() {
   print('Usage: vunches <command> [options]')
   print('')
   print('Commands:')
-  print('  devices                  Discover Chromecast devices on the network')
+  print('  devices                  Discover Chromecast devices on the network (--fresh to skip cache)')
+  print('  daemon                   Watch for Chromecasts continuously, keeping the device cache warm')
   print('  channels [query]         List/search channels (--category, --limit, --verbose)')
   print('  watch <name>             Open a stream in mpv')
   print('  cast <name>              Cast to a Chromecast (--device <name>)')
@@ -491,7 +546,8 @@ async function main() {
 
   try {
     switch (cmd) {
-      case 'devices':  return await cmdDevices()
+      case 'devices':  return await cmdDevices(args)
+      case 'daemon':   return await cmdDaemon()
       case 'channels': return await cmdChannels(rest[0], args)
       case 'watch':    return await cmdWatch(rest[0] || '', args)
       case 'cast':     return await cmdCast(rest[0] || '', args)
