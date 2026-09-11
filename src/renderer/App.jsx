@@ -12,6 +12,12 @@ import CastBar from './components/CastBar'
 import LoadingScreen from './components/LoadingScreen'
 import EpgGuide from './components/EpgGuide'
 
+function isValidSource(source) {
+  if (!source) return false
+  if (source.type === 'xtream') return !!(source.host && source.username && source.password)
+  return !!source.url
+}
+
 export default function App() {
   const {
     sources, setSources, setChannels, setLoading, setLoadError,
@@ -81,7 +87,7 @@ export default function App() {
       }
 
       // Clean up old stremio-type sources and load the active source
-      const allSources = (savedSources || []).filter(s => s.type !== 'stremio' && s.url)
+      const allSources = (savedSources || []).filter(s => s.type !== 'stremio' && isValidSource(s))
       if (allSources.length !== (savedSources || []).length) {
         // Persist the cleaned list
         setSources(allSources)
@@ -179,8 +185,8 @@ export default function App() {
 
   // ── Load source ───────────────────────────────────────────────────────────
   async function loadSource(source) {
-    if (!source || source.type === 'stremio' || !source.url) {
-      // Skip stremio sources (now global) or sources without URLs
+    if (!source || source.type === 'stremio' || !isValidSource(source)) {
+      // Skip stremio sources (now global) or sources missing required fields
       if (source?.type === 'stremio') return
       setChannels([])
       return

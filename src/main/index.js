@@ -51,6 +51,7 @@ function createWindow() {
     win.webContents.openDevTools({ mode: 'detach' })
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
+    if (process.env['DEBUG_DEVTOOLS']) win.webContents.openDevTools({ mode: 'detach' })
   }
 
   return win
