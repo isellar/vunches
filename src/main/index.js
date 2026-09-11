@@ -1,6 +1,12 @@
 const { app, BrowserWindow, ipcMain } = require('electron')
 const { join } = require('path')
 
+// Some Linux GPU/Mesa combos crash the GPU process on startup (GPU state invalid /
+// GPU process launch failed), taking the whole window down to a blank gray screen.
+// Software rendering avoids the crash; Chromium UI perf cost is negligible since
+// video playback runs through mpv, not this window.
+if (process.platform === 'linux') app.disableHardwareAcceleration()
+
 const config = require('../shared/config')
 const { MdnsDiscovery } = require('../shared/mdns')
 const { HlsProxy, ensureFirewallRule } = require('../shared/hls-proxy')
