@@ -184,6 +184,9 @@ async function cmdWatch(name, opts = {}) {
   if (!result.launched) {
     print(`Error: ${result.error}`)
     process.exit(1)
+  } else if (result.error) {
+    print(`Warning: mpv exited early: ${result.error}`)
+    process.exit(1)
   }
 }
 
